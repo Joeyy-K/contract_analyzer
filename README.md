@@ -36,7 +36,7 @@ A powerful API for analyzing legal contracts built with FastAPI. The system allo
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/yourusername/contract-analyzer-api.git
+git clone https://github.com/Joeyy-K/contract_analyzer.git
 cd contract-analyzer-api
 ```
 
