@@ -1,0 +1,11 @@
+# databases
+*.sqlite3
+*.db
+
+# Environment variables
+.env
+
+# Python virtual environment
+venv/
+__pycache__/
+generator.py
