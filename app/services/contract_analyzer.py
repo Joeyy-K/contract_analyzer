@@ -1,100 +1,45 @@
-# === File: app/services/contract_analyzer.py (Complete) ===
-import json
 import logging
 from typing import Dict, Any
-import requests
-import asyncio
+from pathlib import Path
 
 from app.core.config import settings
+from .clause_extractor import ClauseExtractor  # Add this import
+
+# Initialize the ClauseExtractor with config
+CLAUSE_CONFIG_PATH = Path(__file__).parent / "clause_definitions.json"
+clause_extractor = ClauseExtractor(CLAUSE_CONFIG_PATH)
 
 logger = logging.getLogger(__name__)
 
 async def analyze_contract_text(contract_text: str) -> Dict[str, Any]:
-    """
-    Analyze contract text using Hugging Face's Inference API to extract key legal clauses.
-    
-    Args:
-        contract_text: The raw text of the contract document
-        
-    Returns:
-        A dictionary containing extracted clauses and their content
-    """
+    """Analyze contract text using our rule-based ClauseExtractor"""
     try:
-        # Check if HUGGINGFACE_API_TOKEN is available
-        if not settings.HUGGINGFACE_API_TOKEN:
-            # Fallback to backup analysis method
-            return await analyze_contract_with_fallback(contract_text)
-            
-        # model that works with the free tier
-        API_URL = "https://api-inference.huggingface.co/models/google/flan-t5-large"
+        # Use our ClauseExtractor as primary method
+        extracted_clauses = clause_extractor.extract_clauses(contract_text)
         
-        headers = {
-            "Authorization": f"Bearer {settings.HUGGINGFACE_API_TOKEN}",
-            "Content-Type": "application/json"
+        # Convert to the expected format
+        return {
+            "termination_clause": _format_clause(extracted_clauses, "termination"),
+            "confidentiality_clause": _format_clause(extracted_clauses, "confidentiality"),
+            "payment_terms": _format_clause(extracted_clauses, "payment_terms"),
+            "governing_law": _format_clause(extracted_clauses, "governing_law"),
+            "limitation_of_liability": _format_clause(extracted_clauses, "limitation_of_liability")
         }
         
-        # contract text to stay within limits
-        shortened_text = contract_text[:3000]  # Takes first 3000 chars to stay within context window
-        
-        section_numbers = {
-            "termination_clause": ["3", "termination", "term"],
-            "confidentiality_clause": ["4", "confidential", "confid"],
-            "payment_terms": ["2", "payment", "compensation", "fees"],
-            "governing_law": ["5", "law", "govern"],
-            "limitation_of_liability": ["6", "liab", "limit"]
-        }
-
-        # Processes each clause separately with explicit requests
-        clause_names = [
-            "termination_clause",
-            "confidentiality_clause",
-            "payment_terms",
-            "governing_law",
-            "limitation_of_liability"
-        ]
-        
-        results = {}
-        
-        for clause in clause_names:
-            # Format a specific question for each clause
-            prompt = f"Extract the {clause.replace('_', ' ')} from this contract or respond with 'Not found': {shortened_text}"
-            
-            payload = {
-                "inputs": prompt,
-                "parameters": {
-                    "max_new_tokens": 250,  
-                    "temperature": 0.1
-                }
-            }
-            
-            try:
-                response = requests.post(API_URL, headers=headers, json=payload)
-                
-                if response.status_code == 200:
-                    response_data = response.json()
-                    
-                    if isinstance(response_data, list) and len(response_data) > 0:
-                        clause_text = response_data[0].get("generated_text", "Not found")
-                    else:
-                        clause_text = response_data.get("generated_text", "Not found")
-                    
-                    # Clean up the response 
-                    if clause_text.lower().startswith("the ") and " is:" in clause_text.lower():
-                        clause_text = clause_text.split(" is:", 1)[1].strip()
-                        
-                    results[clause] = clause_text
-                else:
-                    logger.warning(f"Error getting {clause}: {response.status_code} - {response.text}")
-                    results[clause] = "Error extracting clause"
-            except Exception as e:
-                logger.error(f"Error processing {clause}: {str(e)}")
-                results[clause] = "Error extracting clause"
-        
-        return results
-            
     except Exception as e:
-        logger.error(f"Error during contract analysis: {str(e)}")
-        return {"error": f"Failed to analyze contract: {str(e)}"}
+        logger.error(f"Rule-based analysis failed: {str(e)}")
+        # Fallback to previous method if needed
+        return await analyze_contract_with_fallback(contract_text)
+
+def _format_clause(extracted_clauses: list, clause_type: str) -> str:
+    """Extract and format the highest confidence clause of specified type"""
+    matches = [c for c in extracted_clauses if c['clause_type'] == clause_type]
+    if not matches:
+        return "Not found"
+    
+    # Get highest confidence match
+    best_match = max(matches, key=lambda x: x['confidence'])
+    return f"{best_match['text']}\n(Confidence: {best_match['confidence']:.0%})"
 
 async def analyze_contract_with_fallback(contract_text: str) -> Dict[str, Any]:
     """

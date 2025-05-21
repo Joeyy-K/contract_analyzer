@@ -1,0 +1,2531 @@
+################################################################################
+# FILE: ./app/main.py
+################################################################################
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.api.v1 import auth
+from app.api.v1 import contracts
+from app.models.user import Base
+from app.db.session import engine
+
+Base.metadata.create_all(bind=engine)
+
+app = FastAPI(
+    title="Contract Analyzer API",
+    description="API for analyzing legal contracts",
+    version="1.0.0",
+)
+
+# Middleware for CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
+
+app.include_router(
+    contracts.router,
+    prefix="/api/v1/contracts",
+    tags=["contracts"]
+)
+
+@app.get("/")
+def read_root():
+    return {"message": "Welcome to Contract Analyzer API"}
+
+
+################################################################################
+# FILE: ./app/models/user.py
+################################################################################
+from sqlalchemy import Column, Integer, String, DateTime, Boolean
+from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship
+from app.db.base_class import Base
+
+class User(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True, nullable=False)
+    hashed_password = Column(String, nullable=False)
+    full_name = Column(String)
+    is_active = Column(Boolean(), default=True)
+    is_superuser = Column(Boolean(), default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    contracts = relationship("Contract", back_populates="user")
+
+
+################################################################################
+# FILE: ./app/models/__init__.py
+################################################################################
+
+
+
+################################################################################
+# FILE: ./app/models/contract.py
+################################################################################
+# app/models/contract.py (updated)
+from sqlalchemy import Column, Integer, String, Text, ForeignKey, DateTime, JSON
+from sqlalchemy.orm import relationship
+from sqlalchemy.sql import func
+
+from app.db.base_class import Base  
+
+class Contract(Base):
+    __tablename__ = "contracts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    filename = Column(String(255), nullable=False)
+    file_type = Column(String(10), nullable=False)  # 'pdf' or 'docx'
+    content = Column(Text, nullable=False)
+    uploaded_at = Column(DateTime(timezone=True), server_default=func.now())
+    analysis_results = Column(JSON, nullable=True) 
+    user = relationship("User", back_populates="contracts")
+
+
+################################################################################
+# FILE: ./app/services/file_parser.py
+################################################################################
+from typing import Optional, Tuple
+
+from fastapi import HTTPException, UploadFile
+
+from app.services.pdf_parser import parse_pdf
+from app.services.docx_parser import parse_docx
+
+
+async def get_file_type(filename: str) -> str:
+    """
+    Determine file type from filename.
+    """
+    if filename.lower().endswith(".pdf"):
+        return "pdf"
+    elif filename.lower().endswith(".docx"):
+        return "docx"
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported file type. Only PDF and DOCX files are supported."
+        )
+
+
+async def parse_contract_text(file: UploadFile) -> Tuple[str, str]:
+    """
+    Parse contract text from an uploaded file.
+    Returns a tuple of (file_type, extracted_text)
+    """
+
+    file_type = await get_file_type(file.filename)
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    if file_type == "pdf":
+        text = await parse_pdf(content)
+    elif file_type == "docx":
+        text = await parse_docx(content)
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported file type")
+    
+    if text is None or text == "":
+        raise HTTPException(status_code=422, detail="Could not extract text from file")
+
+    await file.seek(0)
+    
+    return file_type, text
+
+
+################################################################################
+# FILE: ./app/services/contract_analyzer.py
+################################################################################
+# === File: app/services/contract_analyzer.py (Complete) ===
+import json
+import logging
+from typing import Dict, Any
+import requests
+import asyncio
+
+from app.core.config import settings
+
+logger = logging.getLogger(__name__)
+
+async def analyze_contract_text(contract_text: str) -> Dict[str, Any]:
+    """
+    Analyze contract text using Hugging Face's Inference API to extract key legal clauses.
+    
+    Args:
+        contract_text: The raw text of the contract document
+        
+    Returns:
+        A dictionary containing extracted clauses and their content
+    """
+    try:
+        # Check if HUGGINGFACE_API_TOKEN is available
+        if not settings.HUGGINGFACE_API_TOKEN:
+            # Fallback to backup analysis method
+            return await analyze_contract_with_fallback(contract_text)
+            
+        # model that works with the free tier
+        API_URL = "https://api-inference.huggingface.co/models/google/flan-t5-large"
+        
+        headers = {
+            "Authorization": f"Bearer {settings.HUGGINGFACE_API_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        
+        # contract text to stay within limits
+        shortened_text = contract_text[:3000]  # Takes first 3000 chars to stay within context window
+        
+        section_numbers = {
+            "termination_clause": ["3", "termination", "term"],
+            "confidentiality_clause": ["4", "confidential", "confid"],
+            "payment_terms": ["2", "payment", "compensation", "fees"],
+            "governing_law": ["5", "law", "govern"],
+            "limitation_of_liability": ["6", "liab", "limit"]
+        }
+
+        # Processes each clause separately with explicit requests
+        clause_names = [
+            "termination_clause",
+            "confidentiality_clause",
+            "payment_terms",
+            "governing_law",
+            "limitation_of_liability"
+        ]
+        
+        results = {}
+        
+        for clause in clause_names:
+            # Format a specific question for each clause
+            prompt = f"Extract the {clause.replace('_', ' ')} from this contract or respond with 'Not found': {shortened_text}"
+            
+            payload = {
+                "inputs": prompt,
+                "parameters": {
+                    "max_new_tokens": 250,  
+                    "temperature": 0.1
+                }
+            }
+            
+            try:
+                response = requests.post(API_URL, headers=headers, json=payload)
+                
+                if response.status_code == 200:
+                    response_data = response.json()
+                    
+                    if isinstance(response_data, list) and len(response_data) > 0:
+                        clause_text = response_data[0].get("generated_text", "Not found")
+                    else:
+                        clause_text = response_data.get("generated_text", "Not found")
+                    
+                    # Clean up the response 
+                    if clause_text.lower().startswith("the ") and " is:" in clause_text.lower():
+                        clause_text = clause_text.split(" is:", 1)[1].strip()
+                        
+                    results[clause] = clause_text
+                else:
+                    logger.warning(f"Error getting {clause}: {response.status_code} - {response.text}")
+                    results[clause] = "Error extracting clause"
+            except Exception as e:
+                logger.error(f"Error processing {clause}: {str(e)}")
+                results[clause] = "Error extracting clause"
+        
+        return results
+            
+    except Exception as e:
+        logger.error(f"Error during contract analysis: {str(e)}")
+        return {"error": f"Failed to analyze contract: {str(e)}"}
+
+async def analyze_contract_with_fallback(contract_text: str) -> Dict[str, Any]:
+    """
+    Fallback analysis method when HuggingFace API is not available.
+    This is a simple rule-based extraction based on common patterns.
+    
+    Args:
+        contract_text: The raw text of the contract document
+        
+    Returns:
+        A dictionary containing extracted clauses and their content
+    """
+    results = {}
+    contract_lower = contract_text.lower()
+
+    # 1. Keyword extraction
+    results["termination_clause"] = extract_clause_by_keywords(
+        contract_text, contract_lower, [
+            "termination", "terminate", "term and termination", 
+            "cancellation", "cancel this agreement", "early termination",
+            "right to terminate", "terminating this agreement", 
+            "effect of termination", "agreement shall terminate",
+            "end of term", "expiration", "canceling"
+        ]
+    )
+    
+    results["confidentiality_clause"] = extract_clause_by_keywords(
+        contract_text, contract_lower, [
+            "confidentiality", "confidential information", "non-disclosure"
+        ]
+    )
+    
+    results["payment_terms"] = extract_clause_by_keywords(
+        contract_text, contract_lower, [
+            "payment terms", "payment schedule", "fees", "compensation", "invoice"
+        ]
+    )
+    
+    results["governing_law"] = extract_clause_by_keywords(
+        contract_text, contract_lower, [
+            "governing law", "jurisdiction", "applicable law", "laws of", "governed by"
+        ]
+    )
+    
+    results["limitation_of_liability"] = extract_clause_by_keywords(
+        contract_text, contract_lower, [
+            "limitation of liability", "limited liability", "limitation on liability", "not be liable"
+        ]
+    )
+
+    # 2. Section number-based extraction fallback
+    section_numbers = {
+        "termination_clause": ["3", "termination", "term"],
+        "confidentiality_clause": ["4", "confidential", "confid"],
+        "payment_terms": ["2", "payment", "compensation", "fees"],
+        "governing_law": ["5", "law", "govern"],
+        "limitation_of_liability": ["6", "liab", "limit"]
+    }
+
+    for clause_type, identifiers in section_numbers.items():
+        if results.get(clause_type, "Not found") == "Not found":
+            for iden in identifiers:
+                # Look for a section header like "\n3." or "\nPayment Terms"
+                pattern = f"\n{iden}."
+                idx = contract_lower.find(pattern)
+                
+                if idx == -1:
+                    # Try to match by keyword
+                    idx = contract_lower.find(iden)
+                
+                if idx != -1:
+                    # Find section start
+                    start_pos = contract_text[:idx].rfind("\n\n")
+                    if start_pos == -1:
+                        start_pos = max(0, contract_text[:idx].rfind("\n"))
+                    
+                    # Find section end 
+                    end_pos = contract_text.find("\n\n", idx)
+                    if end_pos == -1:
+                        end_pos = len(contract_text)
+                    
+                    extracted_text = contract_text[start_pos:end_pos].strip()
+
+                    if len(extracted_text) > 1000:
+                        paragraphs = extracted_text.split("\n")
+                        for i, para in enumerate(paragraphs):
+                            if iden.lower() in para.lower():
+                                start_para = max(0, i-1)
+                                end_para = min(len(paragraphs), i+3)
+                                extracted_text = "\n".join(paragraphs[start_para:end_para])
+                                break
+
+                    results[clause_type] = extracted_text
+                    break 
+
+    return results
+
+
+def extract_clause_by_keywords(text: str, text_lower: str, keywords: list, context_length: int = 300) -> str:
+    for keyword in keywords:
+        index = text_lower.find(keyword)
+        if index != -1:
+            # Look for section headers (numbered sections or all caps)
+            section_pattern = r"\n\s*(\d+\.|\#{1,3}|[A-Z][A-Z\s]+:)\s+"
+            
+            # Find section start (look backward for section headers)
+            start_pos = text[:index].rfind("\n\n")
+            if start_pos == -1:  # If no double newline, try single newline
+                start_pos = max(0, text[:index].rfind("\n"))
+            
+            # Find section end (next double newline or section header)
+            end_pos = text.find("\n\n", index)
+            if end_pos == -1:  
+                end_pos = len(text)
+
+            extracted_text = text[start_pos:end_pos].strip()
+            
+            # If extracted text is too long
+            if len(extracted_text) > 1000:
+                # paragraph boundaries
+                paragraphs = extracted_text.split("\n")
+                # Find which paragraph contains keywords
+                for i, para in enumerate(paragraphs):
+                    if keyword in para.lower():
+                        # Take this paragraph and adjacent ones
+                        start_para = max(0, i-1)
+                        end_para = min(len(paragraphs), i+3)
+                        return "\n".join(paragraphs[start_para:end_para])
+            
+            return extracted_text
+    
+    return "Not found"
+
+
+################################################################################
+# FILE: ./app/services/__init__.py
+################################################################################
+
+
+
+################################################################################
+# FILE: ./app/services/docx_parser.py
+################################################################################
+import io
+from typing import Optional
+
+from docx import Document
+
+
+async def parse_docx(file_content: bytes) -> Optional[str]:
+    """
+    Extract text from a DOCX file using python-docx.
+    """
+    try:
+        doc = Document(io.BytesIO(file_content))
+        text = []
+        for paragraph in doc.paragraphs:
+            text.append(paragraph.text)
+        return "\n".join(text).strip()
+    except Exception as e:
+        print(f"Error parsing DOCX: {str(e)}")
+        return None
+
+
+################################################################################
+# FILE: ./app/services/pdf_parser.py
+################################################################################
+import io
+from typing import Optional
+
+import fitz  
+
+
+async def parse_pdf(file_content: bytes) -> Optional[str]:
+    """
+    Extract text from a PDF file using PyMuPDF.
+    """
+    try:
+        with fitz.open(stream=file_content, filetype="pdf") as pdf:
+            text = ""
+            for page in pdf:
+                text += page.get_text()
+            return text.strip()
+    except Exception as e:
+        print(f"Error parsing PDF: {str(e)}")
+        return None
+
+
+################################################################################
+# FILE: ./app/services/enhanced_parser/__init__.py
+################################################################################
+"""
+Enhanced document parser for contract processing.
+
+This package provides comprehensive document parsing capabilities for contracts
+in multiple formats (PDF, DOCX, TXT) with text preprocessing and section detection.
+"""
+
+from .contract_parser import ContractParser
+from .document_parser import DocumentParser
+from .text_preprocessor import TextPreprocessor
+from .section_detector import SectionDetector
+from .pdf_parser import PDFParser
+from .docx_parser import DOCXParser
+from .txt_parser import TXTParser
+
+__all__ = [
+    'ContractParser',
+    'DocumentParser', 
+    'TextPreprocessor',
+    'SectionDetector',
+    'PDFParser',
+    'DOCXParser',
+    'TXTParser'
+]
+
+# Version
+__version__ = '1.0.0'
+
+
+################################################################################
+# FILE: ./app/services/enhanced_parser/section_detector.py
+################################################################################
+import re
+from typing import List, Dict, Any, Tuple
+
+
+class SectionDetector:
+    """
+    Detects and extracts sections from contract documents.
+    """
+    
+    def __init__(self):
+        # Patterns for different section header styles
+        self.section_patterns = [
+            # Numbered sections: "1.", "1.1", "Section 1"
+            re.compile(r'^(\d+(?:\.\d+)*\.)\s+(.+)$', re.MULTILINE),
+            re.compile(r'^(?:Section|Article)\s+(\d+(?:\.\d+)*)[:\.]?\s*(.*)$', re.MULTILINE | re.IGNORECASE),
+            
+            # Roman numerals: "I.", "II.", "III."
+            re.compile(r'^([IVX]+\.)\s+(.+)$', re.MULTILINE),
+            
+            # Lettered sections: "A.", "B.", "(a)", "(b)"
+            re.compile(r'^([A-Z]\.)\s+(.+)$', re.MULTILINE),
+            re.compile(r'^\(([a-z])\)\s+(.+)$', re.MULTILINE),
+            
+            # ALL CAPS headers
+            re.compile(r'^([A-Z\s]{3,})$', re.MULTILINE),
+            
+            # Title case headers (likely section headers)
+            re.compile(r'^([A-Z][a-z\s]+(?:[A-Z][a-z\s]+)*):?\s*$', re.MULTILINE),
+        ]
+        
+        # Common contract section keywords
+        self.section_keywords = [
+            'definitions', 'interpretation', 'parties', 'scope', 'term', 'duration',
+            'obligations', 'payment', 'fees', 'termination', 'confidentiality',
+            'warranty', 'liability', 'indemnification', 'dispute', 'governing law',
+            'amendment', 'assignment', 'force majeure', 'severability', 'entire agreement',
+            'notices', 'counterparts', 'execution', 'representations', 'covenants'
+        ]
+    
+    def detect_sections(self, text: str) -> List[Dict[str, Any]]:
+        """
+        Detect and extract sections from text.
+        
+        Args:
+            text: Cleaned document text
+            
+        Returns:
+            List of section dictionaries with metadata
+        """
+        if not text:
+            return []
+        
+        sections = []
+        
+        # Find all potential section headers
+        potential_headers = self._find_section_headers(text)
+        
+        if not potential_headers:
+            # If no headers found, treat whole text as one section
+            return [{
+                'number': '1',
+                'title': 'Document Content',
+                'content': text,
+                'start_pos': 0,
+                'end_pos': len(text),
+                'level': 1,
+                'type': 'content'
+            }]
+        
+        # Extract sections based on headers
+        for i, header in enumerate(potential_headers):
+            section_start = header['start']
+            section_end = potential_headers[i + 1]['start'] if i + 1 < len(potential_headers) else len(text)
+            
+            section_content = text[section_start:section_end].strip()
+            
+            # Remove the header from content
+            header_text = header['full_match']
+            if section_content.startswith(header_text):
+                section_content = section_content[len(header_text):].strip()
+            
+            section = {
+                'number': header['number'],
+                'title': header['title'],
+                'content': section_content,
+                'start_pos': section_start,
+                'end_pos': section_end,
+                'level': self._determine_level(header['number']),
+                'type': self._classify_section(header['title'])
+            }
+            
+            sections.append(section)
+        
+        return sections
+    
+    def _find_section_headers(self, text: str) -> List[Dict[str, Any]]:
+        """Find all potential section headers in text."""
+        headers = []
+        
+        for pattern in self.section_patterns:
+            for match in pattern.finditer(text):
+                if len(match.groups()) >= 2:
+                    number = match.group(1).strip()
+                    title = match.group(2).strip()
+                elif len(match.groups()) == 1:
+                    # For ALL CAPS or title case patterns
+                    title = match.group(1).strip()
+                    number = str(len(headers) + 1)
+                else:
+                    continue
+                
+                headers.append({
+                    'start': match.start(),
+                    'end': match.end(),
+                    'number': number,
+                    'title': title,
+                    'full_match': match.group(0),
+                    'pattern_type': str(pattern.pattern)
+                })
+        
+        # Sort by position in text
+        headers.sort(key=lambda x: x['start'])
+        
+        # Remove duplicates and overlapping matches
+        headers = self._deduplicate_headers(headers)
+        
+        return headers
+    
+    def _deduplicate_headers(self, headers: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Remove duplicate and overlapping headers."""
+        if not headers:
+            return []
+        
+        deduplicated = [headers[0]]
+        
+        for header in headers[1:]:
+            last_header = deduplicated[-1]
+            
+            # Skip if too close to previous header (likely overlap)
+            if header['start'] - last_header['end'] < 10:
+                continue
+            
+            # Skip if title is too similar to previous
+            if self._similar_titles(header['title'], last_header['title']):
+                continue
+            
+            deduplicated.append(header)
+        
+        return deduplicated
+    
+    def _similar_titles(self, title1: str, title2: str) -> bool:
+        """Check if two titles are similar (to avoid duplicates)."""
+        # Simple similarity check - could be enhanced
+        title1_clean = re.sub(r'[^\w\s]', '', title1.lower())
+        title2_clean = re.sub(r'[^\w\s]', '', title2.lower())
+        
+        return title1_clean == title2_clean
+    
+    def _determine_level(self, number: str) -> int:
+        """Determine the hierarchical level of a section."""
+        if re.match(r'^\d+\.$', number):
+            return 1  # Top level: "1.", "2."
+        elif re.match(r'^\d+\.\d+\.$', number):
+            return 2  # Second level: "1.1.", "2.3."
+        elif re.match(r'^\d+\.\d+\.\d+\.$', number):
+            return 3  # Third level: "1.1.1.", "2.3.4."
+        elif re.match(r'^[IVX]+\.$', number):
+            return 1  # Roman numerals at top level
+        elif re.match(r'^[A-Z]\.$', number):
+            return 2  # Letters at second level
+        elif re.match(r'^\([a-z]\)$', number):
+            return 3  # Parenthetical lowercase letters at third level
+        else:
+            return 1  # Default to top level
+    
+    def _classify_section(self, title: str) -> str:
+        """Classify section type based on title."""
+        title_lower = title.lower()
+        
+        for keyword in self.section_keywords:
+            if keyword in title_lower:
+                return keyword
+        
+        # Check for common patterns
+        if any(word in title_lower for word in ['definition', 'meaning', 'interpretation']):
+            return 'definitions'
+        elif any(word in title_lower for word in ['payment', 'fee', 'cost', 'price']):
+            return 'payment'
+        elif any(word in title_lower for word in ['term', 'duration', 'period']):
+            return 'term'
+        elif any(word in title_lower for word in ['obligation', 'duty', 'requirement']):
+            return 'obligations'
+        elif any(word in title_lower for word in ['termination', 'expiration', 'end']):
+            return 'termination'
+        elif any(word in title_lower for word in ['confidential', 'non-disclosure', 'privacy']):
+            return 'confidentiality'
+        elif any(word in title_lower for word in ['dispute', 'resolution', 'arbitration']):
+            return 'dispute'
+        else:
+            return 'general'
+
+
+################################################################################
+# FILE: ./app/services/enhanced_parser/txt_parser.py
+################################################################################
+import chardet
+from typing import Dict, Any, Optional
+
+
+class TXTParser:
+    """
+    Enhanced text file parser with encoding detection and basic metadata extraction.
+    """
+    
+    def __init__(self):
+        # Common encodings to try
+        self.encodings = ['utf-8', 'utf-16', 'latin-1', 'cp1252', 'ascii']
+    
+    def parse(self, file_path: str) -> Dict[str, Any]:
+        """Parse text file with automatic encoding detection."""
+        result = {
+            'text': '',
+            'metadata': {},
+            'success': False,
+            'errors': []
+        }
+        
+        try:
+            # First, try to detect encoding
+            encoding = self._detect_encoding(file_path)
+            
+            # Read file with detected encoding
+            with open(file_path, 'r', encoding=encoding) as file:
+                text = file.read()
+            
+            # Extract metadata
+            result['metadata'] = self._extract_metadata(text, file_path, encoding)
+            
+            # Clean and process text
+            result['text'] = self._clean_text(text)
+            result['success'] = True
+            
+        except Exception as e:
+            result['errors'].append(f"Error parsing text file: {str(e)}")
+            result['success'] = False
+        
+        return result
+    
+    def parse_bytes(self, file_content: bytes) -> Dict[str, Any]:
+        """Parse text from bytes content."""
+        result = {
+            'text': '',
+            'metadata': {},
+            'success': False,
+            'errors': []
+        }
+        
+        try:
+            # Detect encoding from bytes
+            encoding = self._detect_encoding_from_bytes(file_content)
+            
+            # Decode bytes to text
+            text = file_content.decode(encoding)
+            
+            # Extract metadata
+            result['metadata'] = self._extract_metadata(text, '', encoding)
+            
+            # Clean and process text
+            result['text'] = self._clean_text(text)
+            result['success'] = True
+            
+        except Exception as e:
+            result['errors'].append(f"Error parsing text file: {str(e)}")
+            result['success'] = False
+        
+        return result
+    
+    def _detect_encoding(self, file_path: str) -> str:
+        """Detect file encoding using multiple methods."""
+        # First try chardet
+        try:
+            with open(file_path, 'rb') as file:
+                raw_data = file.read()
+                return self._detect_encoding_from_bytes(raw_data)
+        except:
+            pass
+        
+        # Fallback: try common encodings
+        for encoding in self.encodings:
+            try:
+                with open(file_path, 'r', encoding=encoding) as file:
+                    file.read()
+                return encoding
+            except (UnicodeDecodeError, UnicodeError):
+                continue
+        
+        # Last resort
+        return 'utf-8'
+    
+    def _detect_encoding_from_bytes(self, raw_data: bytes) -> str:
+        """Detect encoding from raw bytes."""
+        # Use chardet if available
+        try:
+            import chardet
+            detected = chardet.detect(raw_data)
+            if detected['encoding'] and detected['confidence'] > 0.7:
+                return detected['encoding']
+        except ImportError:
+            pass
+        
+        # Fallback: try common encodings
+        for encoding in self.encodings:
+            try:
+                raw_data.decode(encoding)
+                return encoding
+            except (UnicodeDecodeError, UnicodeError):
+                continue
+        
+        return 'utf-8'
+    
+    def _extract_metadata(self, text: str, file_path: str, encoding: str) -> Dict[str, Any]:
+        """Extract basic metadata from text content."""
+        import os
+        
+        metadata = {
+            'encoding': encoding,
+            'lines': len(text.splitlines()),
+            'characters': len(text),
+            'words': len(text.split()),
+            'paragraphs': len([p for p in text.split('\n\n') if p.strip()])
+        }
+        
+        # Add file stats if file_path is provided
+        if file_path and os.path.exists(file_path):
+            stat = os.stat(file_path)
+            metadata.update({
+                'file_size': stat.st_size,
+                'modified_time': stat.st_mtime,
+                'created_time': stat.st_ctime
+            })
+        
+        return metadata
+    
+    def _clean_text(self, text: str) -> str:
+        """Clean and normalize text content."""
+        # Remove BOM if present
+        if text.startswith('\ufeff'):
+            text = text[1:]
+        
+        # Normalize line endings
+        text = text.replace('\r\n', '\n').replace('\r', '\n')
+        
+        # Remove excessive whitespace but preserve structure
+        lines = text.split('\n')
+        cleaned_lines = []
+        
+        for line in lines:
+            # Strip trailing whitespace but keep leading whitespace for indentation
+            cleaned_line = line.rstrip()
+            cleaned_lines.append(cleaned_line)
+        
+        # Join lines back and remove excessive blank lines
+        text = '\n'.join(cleaned_lines)
+        
+        # Remove more than 2 consecutive newlines
+        import re
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        
+        return text.strip()
+
+
+################################################################################
+# FILE: ./app/services/enhanced_parser/docx_parser.py
+################################################################################
+import io
+from typing import Dict, Any, Optional
+import zipfile
+
+try:
+    from docx import Document
+    HAS_PYTHON_DOCX = True
+except ImportError:
+    HAS_PYTHON_DOCX = False
+
+
+class DOCXParser:
+    """
+    Enhanced DOCX parser that extracts text, metadata, and structural elements.
+    """
+    
+    def __init__(self):
+        if not HAS_PYTHON_DOCX:
+            raise ImportError("python-docx is required for DOCX parsing. Install with: pip install python-docx")
+    
+    def parse(self, file_path: str) -> Dict[str, Any]:
+        """Parse DOCX file and extract text with metadata."""
+        result = {
+            'text': '',
+            'metadata': {},
+            'success': False,
+            'errors': []
+        }
+        
+        try:
+            doc = Document(file_path)
+            result.update(self._extract_content(doc))
+            result['success'] = True
+        except Exception as e:
+            result['errors'].append(f"Error parsing DOCX: {str(e)}")
+            result['success'] = False
+        
+        return result
+    
+    def parse_bytes(self, file_content: bytes) -> Dict[str, Any]:
+        """Parse DOCX from bytes content."""
+        result = {
+            'text': '',
+            'metadata': {},
+            'success': False,
+            'errors': []
+        }
+        
+        try:
+            doc = Document(io.BytesIO(file_content))
+            result.update(self._extract_content(doc))
+            result['success'] = True
+        except Exception as e:
+            result['errors'].append(f"Error parsing DOCX: {str(e)}")
+            result['success'] = False
+        
+        return result
+    
+    def _extract_content(self, doc: Document) -> Dict[str, Any]:
+        """Extract all content from DOCX document."""
+        content = {
+            'text': '',
+            'metadata': {}
+        }
+        
+        # Extract metadata
+        content['metadata'] = self._extract_metadata(doc)
+        
+        # Extract main document text
+        text_parts = []
+        
+        # Process paragraphs
+        for para in doc.paragraphs:
+            if para.text.strip():
+                # Check if paragraph is a heading
+                if para.style.name.startswith('Heading'):
+                    text_parts.append(f"\n{'#' * int(para.style.name[-1])} {para.text}\n")
+                else:
+                    text_parts.append(para.text)
+        
+        # Process tables
+        for table_num, table in enumerate(doc.tables):
+            table_text = f"\n--- Table {table_num + 1} ---\n"
+            for row in table.rows:
+                row_text = " | ".join([cell.text.strip() for cell in row.cells])
+                if row_text.strip():
+                    table_text += row_text + "\n"
+            text_parts.append(table_text)
+        
+        # Extract headers and footers
+        headers_footers = self._extract_headers_footers(doc)
+        if headers_footers:
+            text_parts.append(f"\n--- Headers/Footers ---\n{headers_footers}")
+        
+        content['text'] = "\n".join(text_parts)
+        return content
+    
+    def _extract_metadata(self, doc: Document) -> Dict[str, Any]:
+        """Extract metadata from DOCX document."""
+        metadata = {}
+        
+        try:
+            # Core properties
+            core_props = doc.core_properties
+            metadata.update({
+                'title': getattr(core_props, 'title', '') or '',
+                'author': getattr(core_props, 'author', '') or '',
+                'subject': getattr(core_props, 'subject', '') or '',
+                'created': str(getattr(core_props, 'created', '') or ''),
+                'modified': str(getattr(core_props, 'modified', '') or ''),
+                'last_modified_by': getattr(core_props, 'last_modified_by', '') or '',
+                'revision': str(getattr(core_props, 'revision', '') or ''),
+                'category': getattr(core_props, 'category', '') or '',
+                'comments': getattr(core_props, 'comments', '') or ''
+            })
+            
+            # Document statistics
+            metadata.update({
+                'paragraphs': len(doc.paragraphs),
+                'tables': len(doc.tables)
+            })
+            
+        except Exception as e:
+            metadata['metadata_error'] = str(e)
+        
+        return metadata
+    
+    def _extract_headers_footers(self, doc: Document) -> str:
+        """Extract text from headers and footers."""
+        headers_footers = []
+        
+        try:
+            for section in doc.sections:
+                # Extract header
+                header = section.header
+                if header:
+                    for para in header.paragraphs:
+                        if para.text.strip():
+                            headers_footers.append(f"Header: {para.text}")
+                
+                # Extract footer
+                footer = section.footer
+                if footer:
+                    for para in footer.paragraphs:
+                        if para.text.strip():
+                            headers_footers.append(f"Footer: {para.text}")
+                            
+        except Exception:
+            pass  # Headers/footers extraction is optional
+        
+        return "\n".join(headers_footers)
+
+
+################################################################################
+# FILE: ./app/services/enhanced_parser/contract_parser.py
+################################################################################
+import os
+from typing import Dict, Any, List, Optional
+from pathlib import Path
+
+from .document_parser import DocumentParser
+from .text_preprocessor import TextPreprocessor
+from .section_detector import SectionDetector
+
+
+class ContractParser:
+    """
+    Main contract parsing interface that ties together all parsing components.
+    Provides a unified interface for parsing contracts from various file formats.
+    """
+    
+    def __init__(self):
+        self.document_parser = DocumentParser()
+        self.preprocessor = TextPreprocessor()
+        self.section_detector = SectionDetector()
+    
+    def process_contract(self, file_path: str) -> Dict[str, Any]:
+        """
+        Process a contract document from start to finish.
+        
+        Args:
+            file_path: Path to the contract file
+            
+        Returns:
+            Comprehensive parsing results with all extracted information
+        """
+        result = {
+            'success': False,
+            'file_path': file_path,
+            'file_name': os.path.basename(file_path),
+            'raw_text': '',
+            'cleaned_text': '',
+            'sections': [],
+            'metadata': {},
+            'processing_info': {},
+            'errors': []
+        }
+        
+        try:
+            # Step 1: Parse the document
+            parsing_result = self.document_parser.parse(file_path)
+            
+            if not parsing_result['success']:
+                result['errors'].extend(parsing_result['errors'])
+                return result
+            
+            # Store raw text and metadata
+            result['raw_text'] = parsing_result['text']
+            result['metadata'] = parsing_result['metadata']
+            result['processing_info']['format'] = parsing_result['format']
+            
+            # Step 2: Preprocess the text
+            cleaned_text = self.preprocessor.clean_text(parsing_result['text'])
+            result['cleaned_text'] = cleaned_text
+            
+            # Step 3: Detect sections
+            sections = self.section_detector.detect_sections(cleaned_text)
+            result['sections'] = sections
+            
+            # Step 4: Add processing statistics
+            result['processing_info'].update({
+                'raw_text_length': len(result['raw_text']),
+                'cleaned_text_length': len(result['cleaned_text']),
+                'sections_detected': len(sections),
+                'processing_method': 'enhanced_parser'
+            })
+            
+            result['success'] = True
+            
+        except Exception as e:
+            result['errors'].append(f"Error processing contract: {str(e)}")
+            result['success'] = False
+        
+        return result
+    
+    def process_contract_bytes(self, file_content: bytes, filename: str) -> Dict[str, Any]:
+        """
+        Process a contract document from bytes content.
+        Useful for uploaded files without saving to disk.
+        
+        Args:
+            file_content: File content as bytes
+            filename: Original filename for format detection
+            
+        Returns:
+            Comprehensive parsing results
+        """
+        result = {
+            'success': False,
+            'file_name': filename,
+            'raw_text': '',
+            'cleaned_text': '',
+            'sections': [],
+            'metadata': {},
+            'processing_info': {},
+            'errors': []
+        }
+        
+        try:
+            # Step 1: Parse the document from bytes
+            parsing_result = self.document_parser.parse_bytes(file_content, filename)
+            
+            if not parsing_result['success']:
+                result['errors'].extend(parsing_result['errors'])
+                return result
+            
+            # Store results from parsing
+            result['raw_text'] = parsing_result['text']
+            result['metadata'] = parsing_result['metadata']
+            result['processing_info']['format'] = parsing_result['format']
+            
+            # Step 2: Preprocess the text
+            cleaned_text = self.preprocessor.clean_text(parsing_result['text'])
+            result['cleaned_text'] = cleaned_text
+            
+            # Step 3: Detect sections
+            sections = self.section_detector.detect_sections(cleaned_text)
+            result['sections'] = sections
+            
+            # Step 4: Add processing statistics
+            result['processing_info'].update({
+                'raw_text_length': len(result['raw_text']),
+                'cleaned_text_length': len(result['cleaned_text']),
+                'sections_detected': len(sections),
+                'processing_method': 'enhanced_parser'
+            })
+            
+            result['success'] = True
+            
+        except Exception as e:
+            result['errors'].append(f"Error processing contract: {str(e)}")
+            result['success'] = False
+        
+        return result
+    
+    def get_section_by_type(self, sections: List[Dict[str, Any]], section_type: str) -> Optional[Dict[str, Any]]:
+        """
+        Find a specific section by its type.
+        
+        Args:
+            sections: List of detected sections
+            section_type: Type of section to find (e.g., 'definitions', 'payment')
+            
+        Returns:
+            Section dictionary if found, None otherwise
+        """
+        for section in sections:
+            if section.get('type') == section_type:
+                return section
+        return None
+    
+    def get_sections_by_level(self, sections: List[Dict[str, Any]], level: int) -> List[Dict[str, Any]]:
+        """
+        Get all sections at a specific hierarchical level.
+        
+        Args:
+            sections: List of detected sections
+            level: Hierarchical level (1 = top level, 2 = second level, etc.)
+            
+        Returns:
+            List of sections at the specified level
+        """
+        return [section for section in sections if section.get('level') == level]
+    
+    def search_sections(self, sections: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
+        """
+        Search for sections containing specific keywords.
+        
+        Args:
+            sections: List of detected sections
+            query: Search query (keywords)
+            
+        Returns:
+            List of matching sections
+        """
+        query_lower = query.lower()
+        matching_sections = []
+        
+        for section in sections:
+            # Search in title and content
+            title_match = query_lower in section.get('title', '').lower()
+            content_match = query_lower in section.get('content', '').lower()
+            
+            if title_match or content_match:
+                matching_sections.append(section)
+        
+        return matching_sections
+    
+    def validate_contract_structure(self, sections: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Validate the structure and completeness of a parsed contract.
+        
+        Args:
+            sections: List of detected sections
+            
+        Returns:
+            Validation results with recommendations
+        """
+        validation = {
+            'is_valid': True,
+            'warnings': [],
+            'recommendations': [],
+            'statistics': {}
+        }
+        
+        # Check for essential sections
+        essential_sections = ['definitions', 'obligations', 'payment', 'termination']
+        missing_sections = []
+        
+        found_types = [section.get('type') for section in sections]
+        
+        for essential in essential_sections:
+            if essential not in found_types:
+                missing_sections.append(essential)
+        
+        if missing_sections:
+            validation['warnings'].append(f"Missing essential sections: {', '.join(missing_sections)}")
+            validation['recommendations'].append("Consider adding missing essential sections for completeness")
+        
+        # Check section hierarchy
+        levels = [section.get('level', 1) for section in sections]
+        if levels and max(levels) > 3:
+            validation['warnings'].append("Deep section nesting detected (more than 3 levels)")
+            validation['recommendations'].append("Consider flattening section structure for clarity")
+        
+        # Check section content length
+        short_sections = [s for s in sections if len(s.get('content', '')) < 50]
+        if len(short_sections) > len(sections) * 0.3:  # More than 30% are too short
+            validation['warnings'].append("Many sections have very short content")
+            validation['recommendations'].append("Review section content for completeness")
+        
+        # Statistics
+        validation['statistics'] = {
+            'total_sections': len(sections),
+            'top_level_sections': len(self.get_sections_by_level(sections, 1)),
+            'average_content_length': sum(len(s.get('content', '')) for s in sections) / len(sections) if sections else 0,
+            'section_types_found': list(set(found_types))
+        }
+        
+        # Overall validation
+        if not missing_sections and len(validation['warnings']) == 0:
+            validation['is_valid'] = True
+        else:
+            validation['is_valid'] = len(missing_sections) <= 1  # Allow one missing section
+        
+        return validation
+    
+    def get_supported_formats(self) -> List[str]:
+        """Get list of supported file formats."""
+        return self.document_parser.supported_formats
+    
+    def is_supported_file(self, file_path: str) -> bool:
+        """Check if a file format is supported."""
+        return self.document_parser.is_supported(file_path)
+
+
+################################################################################
+# FILE: ./app/services/enhanced_parser/text_preprocessor.py
+################################################################################
+import re
+from typing import str
+
+
+class TextPreprocessor:
+    """
+    Text preprocessing class to clean and standardize extracted text.
+    """
+    
+    def __init__(self):
+        # Common patterns for cleaning
+        self.patterns = {
+            # Remove excessive whitespace
+            'excessive_spaces': re.compile(r' {2,}'),
+            'excessive_newlines': re.compile(r'\n{3,}'),
+            
+            # Fix common parsing artifacts
+            'page_breaks': re.compile(r'---\s*Page\s+\d+\s*---'),
+            'bullet_points': re.compile(r'^[\s]*[•·▪▫‣⁃]\s*', re.MULTILINE),
+            'numbering': re.compile(r'^\s*\d+\.\s+', re.MULTILINE),
+            
+            # Clean up formatting
+            'header_footer': re.compile(r'(?:Header|Footer):\s*', re.IGNORECASE),
+            'table_markers': re.compile(r'---\s*Table\s+\d+.*?---'),
+            
+            # Fix encoding issues
+            'smart_quotes': re.compile(r'[""''`]'),
+            'unicode_dashes': re.compile(r'[–—]'),
+            'weird_chars': re.compile(r'[^\x00-\x7F]+')
+        }
+        
+        # Replacement patterns
+        self.replacements = {
+            self.patterns['smart_quotes']: '"',
+            self.patterns['unicode_dashes']: '-',
+            self.patterns['weird_chars']: ' '
+        }
+    
+    def clean_text(self, raw_text: str) -> str:
+        """
+        Clean and standardize extracted text.
+        
+        Args:
+            raw_text: Raw text extracted from document
+            
+        Returns:
+            Cleaned and standardized text
+        """
+        if not raw_text:
+            return ""
+        
+        text = raw_text
+        
+        # Step 1: Handle encoding issues
+        text = self._fix_encoding_issues(text)
+        
+        # Step 2: Remove parsing artifacts
+        text = self._remove_parsing_artifacts(text)
+        
+        # Step 3: Normalize whitespace
+        text = self._normalize_whitespace(text)
+        
+        # Step 4: Clean up formatting
+        text = self._clean_formatting(text)
+        
+        # Step 5: Final cleanup
+        text = self._final_cleanup(text)
+        
+        return text.strip()
+    
+    def _fix_encoding_issues(self, text: str) -> str:
+        """Fix common encoding and character issues."""
+        for pattern, replacement in self.replacements.items():
+            text = pattern.sub(replacement, text)
+        return text
+    
+    def _remove_parsing_artifacts(self, text: str) -> str:
+        """Remove common parsing artifacts like page markers."""
+        # Remove page break markers
+        text = self.patterns['page_breaks'].sub('\n', text)
+        
+        # Remove table markers
+        text = self.patterns['table_markers'].sub('\n', text)
+        
+        # Clean header/footer markers
+        text = self.patterns['header_footer'].sub('', text)
+        
+        return text
+    
+    def _normalize_whitespace(self, text: str) -> str:
+        """Normalize spacing and line breaks."""
+        # Replace multiple spaces with single space
+        text = self.patterns['excessive_spaces'].sub(' ', text)
+        
+        # Replace multiple newlines with double newline
+        text = self.patterns['excessive_newlines'].sub('\n\n', text)
+        
+        # Fix spacing around line breaks
+        text = re.sub(r'\s*\n\s*', '\n', text)
+        
+        return text
+    
+    def _clean_formatting(self, text: str) -> str:
+        """Clean up bullet points and numbering."""
+        # Standardize bullet points
+        text = self.patterns['bullet_points'].sub('• ', text)
+        
+        # Clean up numbered lists
+        text = re.sub(r'^\s*(\d+)\.\s+', r'\1. ', text, flags=re.MULTILINE)
+        
+        return text
+    
+    def _final_cleanup(self, text: str) -> str:
+        """Final text cleanup steps."""
+        # Remove leading/trailing whitespace from each line
+        lines = text.split('\n')
+        cleaned_lines = [line.strip() for line in lines]
+        
+        # Remove empty lines at the beginning and end
+        while cleaned_lines and not cleaned_lines[0]:
+            cleaned_lines.pop(0)
+        while cleaned_lines and not cleaned_lines[-1]:
+            cleaned_lines.pop()
+        
+        # Rejoin lines
+        text = '\n'.join(cleaned_lines)
+        
+        # Final whitespace normalization
+        text = re.sub(r'\n\s*\n', '\n\n', text)
+        
+        return text
+
+
+################################################################################
+# FILE: ./app/services/enhanced_parser/pdf_parser.py
+################################################################################
+import io
+from typing import Dict, Any, Optional
+import logging
+
+try:
+    import fitz  # PyMuPDF
+    HAS_PYMUPDF = True
+except ImportError:
+    HAS_PYMUPDF = False
+
+try:
+    import pdfplumber
+    HAS_PDFPLUMBER = True
+except ImportError:
+    HAS_PDFPLUMBER = False
+
+try:
+    import PyPDF2
+    HAS_PYPDF2 = True
+except ImportError:
+    HAS_PYPDF2 = False
+
+try:
+    import pytesseract
+    from PIL import Image
+    HAS_OCR = True
+except ImportError:
+    HAS_OCR = False
+
+
+class PDFParser:
+    """
+    Enhanced PDF parser with multiple extraction strategies and OCR fallback.
+    """
+    
+    def __init__(self):
+        self.logger = logging.getLogger(__name__)
+        self.extraction_methods = []
+        
+        # Register available extraction methods in order of preference
+        if HAS_PDFPLUMBER:
+            self.extraction_methods.append(self._parse_with_pdfplumber)
+        if HAS_PYMUPDF:
+            self.extraction_methods.append(self._parse_with_pymupdf)
+        if HAS_PYPDF2:
+            self.extraction_methods.append(self._parse_with_pypdf2)
+        
+        if not self.extraction_methods:
+            raise ImportError("No PDF parsing libraries available. Install pdfplumber, PyMuPDF, or PyPDF2")
+    
+    def parse(self, file_path: str) -> Dict[str, Any]:
+        """Parse PDF file and extract text with metadata."""
+        result = {
+            'text': '',
+            'metadata': {},
+            'success': False,
+            'errors': [],
+            'method_used': None
+        }
+        
+        # Try each extraction method until one succeeds
+        for method in self.extraction_methods:
+            try:
+                method_result = method(file_path)
+                if method_result['success'] and method_result['text'].strip():
+                    result.update(method_result)
+                    break
+            except Exception as e:
+                self.logger.warning(f"Method {method.__name__} failed: {str(e)}")
+                result['errors'].append(f"{method.__name__}: {str(e)}")
+        
+        # If no method succeeded and OCR is available, try OCR
+        if not result['success'] and HAS_OCR:
+            try:
+                ocr_result = self._parse_with_ocr(file_path)
+                if ocr_result['success']:
+                    result.update(ocr_result)
+            except Exception as e:
+                result['errors'].append(f"OCR failed: {str(e)}")
+        
+        return result
+    
+    def parse_bytes(self, file_content: bytes) -> Dict[str, Any]:
+        """Parse PDF from bytes content."""
+        result = {
+            'text': '',
+            'metadata': {},
+            'success': False,
+            'errors': [],
+            'method_used': None
+        }
+        
+        # Try pdfplumber first (best for structured PDFs)
+        if HAS_PDFPLUMBER:
+            try:
+                result = self._parse_bytes_with_pdfplumber(file_content)
+                if result['success']:
+                    return result
+            except Exception as e:
+                result['errors'].append(f"pdfplumber: {str(e)}")
+        
+        # Try PyMuPDF
+        if HAS_PYMUPDF:
+            try:
+                result = self._parse_bytes_with_pymupdf(file_content)
+                if result['success']:
+                    return result
+            except Exception as e:
+                result['errors'].append(f"PyMuPDF: {str(e)}")
+        
+        # Try PyPDF2
+        if HAS_PYPDF2:
+            try:
+                result = self._parse_bytes_with_pypdf2(file_content)
+                if result['success']:
+                    return result
+            except Exception as e:
+                result['errors'].append(f"PyPDF2: {str(e)}")
+        
+        return result
+    
+    def _parse_with_pdfplumber(self, file_path: str) -> Dict[str, Any]:
+        """Parse PDF using pdfplumber (best for structured PDFs)."""
+        import pdfplumber
+        
+        result = {'text': '', 'metadata': {}, 'success': False, 'method_used': 'pdfplumber'}
+        
+        with pdfplumber.open(file_path) as pdf:
+            # Extract metadata
+            result['metadata'] = {
+                'pages': len(pdf.pages),
+                'author': pdf.metadata.get('Author', ''),
+                'title': pdf.metadata.get('Title', ''),
+                'creator': pdf.metadata.get('Creator', ''),
+                'creation_date': pdf.metadata.get('CreationDate', ''),
+                'subject': pdf.metadata.get('Subject', '')
+            }
+            
+            # Extract text from all pages
+            text_parts = []
+            for page_num, page in enumerate(pdf.pages):
+                page_text = page.extract_text()
+                if page_text:
+                    text_parts.append(f"--- Page {page_num + 1} ---\n{page_text}")
+                
+                # Also extract tables if present
+                tables = page.extract_tables()
+                for table_num, table in enumerate(tables):
+                    table_text = f"\n--- Table {table_num + 1} on Page {page_num + 1} ---\n"
+                    for row in table:
+                        table_text += " | ".join([cell or "" for cell in row]) + "\n"
+                    text_parts.append(table_text)
+            
+            result['text'] = "\n\n".join(text_parts)
+            result['success'] = bool(result['text'].strip())
+        
+        return result
+    
+    def _parse_bytes_with_pdfplumber(self, file_content: bytes) -> Dict[str, Any]:
+        """Parse PDF bytes using pdfplumber."""
+        import pdfplumber
+        
+        result = {'text': '', 'metadata': {}, 'success': False, 'method_used': 'pdfplumber'}
+        
+        with pdfplumber.open(io.BytesIO(file_content)) as pdf:
+            result['metadata'] = {
+                'pages': len(pdf.pages),
+                'author': pdf.metadata.get('Author', ''),
+                'title': pdf.metadata.get('Title', ''),
+                'creator': pdf.metadata.get('Creator', ''),
+                'creation_date': pdf.metadata.get('CreationDate', ''),
+                'subject': pdf.metadata.get('Subject', '')
+            }
+            
+            text_parts = []
+            for page_num, page in enumerate(pdf.pages):
+                page_text = page.extract_text()
+                if page_text:
+                    text_parts.append(f"--- Page {page_num + 1} ---\n{page_text}")
+                
+                tables = page.extract_tables()
+                for table_num, table in enumerate(tables):
+                    table_text = f"\n--- Table {table_num + 1} on Page {page_num + 1} ---\n"
+                    for row in table:
+                        table_text += " | ".join([cell or "" for cell in row]) + "\n"
+                    text_parts.append(table_text)
+            
+            result['text'] = "\n\n".join(text_parts)
+            result['success'] = bool(result['text'].strip())
+        
+        return result
+    
+    def _parse_with_pymupdf(self, file_path: str) -> Dict[str, Any]:
+        """Parse PDF using PyMuPDF (fitz)."""
+        result = {'text': '', 'metadata': {}, 'success': False, 'method_used': 'PyMuPDF'}
+        
+        with fitz.open(file_path) as doc:
+            # Extract metadata
+            metadata = doc.metadata
+            result['metadata'] = {
+                'pages': doc.page_count,
+                'author': metadata.get('author', ''),
+                'title': metadata.get('title', ''),
+                'creator': metadata.get('creator', ''),
+                'creation_date': metadata.get('creationDate', ''),
+                'subject': metadata.get('subject', '')
+            }
+            
+            # Extract text from all pages
+            text_parts = []
+            for page_num in range(doc.page_count):
+                page = doc[page_num]
+                page_text = page.get_text()
+                if page_text.strip():
+                    text_parts.append(f"--- Page {page_num + 1} ---\n{page_text}")
+            
+            result['text'] = "\n\n".join(text_parts)
+            result['success'] = bool(result['text'].strip())
+        
+        return result
+    
+    def _parse_bytes_with_pymupdf(self, file_content: bytes) -> Dict[str, Any]:
+        """Parse PDF bytes using PyMuPDF."""
+        result = {'text': '', 'metadata': {}, 'success': False, 'method_used': 'PyMuPDF'}
+        
+        with fitz.open(stream=file_content, filetype="pdf") as doc:
+            metadata = doc.metadata
+            result['metadata'] = {
+                'pages': doc.page_count,
+                'author': metadata.get('author', ''),
+                'title': metadata.get('title', ''),
+                'creator': metadata.get('creator', ''),
+                'creation_date': metadata.get('creationDate', ''),
+                'subject': metadata.get('subject', '')
+            }
+            
+            text_parts = []
+            for page_num in range(doc.page_count):
+                page = doc[page_num]
+                page_text = page.get_text()
+                if page_text.strip():
+                    text_parts.append(f"--- Page {page_num + 1} ---\n{page_text}")
+            
+            result['text'] = "\n\n".join(text_parts)
+            result['success'] = bool(result['text'].strip())
+        
+        return result
+    
+    def _parse_with_pypdf2(self, file_path: str) -> Dict[str, Any]:
+        """Parse PDF using PyPDF2."""
+        result = {'text': '', 'metadata': {}, 'success': False, 'method_used': 'PyPDF2'}
+        
+        with open(file_path, 'rb') as file:
+            reader = PyPDF2.PdfReader(file)
+            
+            # Extract metadata
+            metadata = reader.metadata
+            result['metadata'] = {
+                'pages': len(reader.pages),
+                'author': metadata.get('/Author', '') if metadata else '',
+                'title': metadata.get('/Title', '') if metadata else '',
+                'creator': metadata.get('/Creator', '') if metadata else '',
+                'creation_date': metadata.get('/CreationDate', '') if metadata else '',
+                'subject': metadata.get('/Subject', '') if metadata else ''
+            }
+            
+            # Extract text from all pages
+            text_parts = []
+            for page_num, page in enumerate(reader.pages):
+                page_text = page.extract_text()
+                if page_text.strip():
+                    text_parts.append(f"--- Page {page_num + 1} ---\n{page_text}")
+            
+            result['text'] = "\n\n".join(text_parts)
+            result['success'] = bool(result['text'].strip())
+        
+        return result
+    
+    def _parse_bytes_with_pypdf2(self, file_content: bytes) -> Dict[str, Any]:
+        """Parse PDF bytes using PyPDF2."""
+        result = {'text': '', 'metadata': {}, 'success': False, 'method_used': 'PyPDF2'}
+        
+        reader = PyPDF2.PdfReader(io.BytesIO(file_content))
+        
+        metadata = reader.metadata
+        result['metadata'] = {
+            'pages': len(reader.pages),
+            'author': metadata.get('/Author', '') if metadata else '',
+            'title': metadata.get('/Title', '') if metadata else '',
+            'creator': metadata.get('/Creator', '') if metadata else '',
+            'creation_date': metadata.get('/CreationDate', '') if metadata else '',
+            'subject': metadata.get('/Subject', '') if metadata else ''
+        }
+        
+        text_parts = []
+        for page_num, page in enumerate(reader.pages):
+            page_text = page.extract_text()
+            if page_text.strip():
+                text_parts.append(f"--- Page {page_num + 1} ---\n{page_text}")
+        
+        result['text'] = "\n\n".join(text_parts)
+        result['success'] = bool(result['text'].strip())
+        
+        return result
+    
+    def _parse_with_ocr(self, file_path: str) -> Dict[str, Any]:
+        """Parse PDF using OCR (for scanned documents)."""
+        result = {'text': '', 'metadata': {}, 'success': False, 'method_used': 'OCR'}
+        
+        # Convert PDF pages to images and OCR them
+        with fitz.open(file_path) as doc:
+            result['metadata'] = {'pages': doc.page_count}
+            
+            text_parts = []
+            for page_num in range(doc.page_count):
+                page = doc[page_num]
+                # Convert page to image
+                pix = page.get_pixmap()
+                img_data = pix.tobytes("ppm")
+                img = Image.open(io.BytesIO(img_data))
+                
+                # OCR the image
+                page_text = pytesseract.image_to_string(img)
+                if page_text.strip():
+                    text_parts.append(f"--- Page {page_num + 1} (OCR) ---\n{page_text}")
+            
+            result['text'] = "\n\n".join(text_parts)
+            result['success'] = bool(result['text'].strip())
+        
+        return result
+
+
+
+################################################################################
+# FILE: ./app/services/enhanced_parser/document_parser.py
+################################################################################
+import os
+import mimetypes
+from typing import Dict, Any, Optional, Tuple, List
+from pathlib import Path
+
+from .pdf_parser import PDFParser
+from .docx_parser import DOCXParser
+from .txt_parser import TXTParser
+from .text_preprocessor import TextPreprocessor
+from .section_detector import SectionDetector
+
+
+class DocumentParser:
+    """
+    Unified document parser that handles multiple file formats with a single interface.
+    """
+    
+    def __init__(self):
+        self.supported_formats = ['.pdf', '.docx', '.txt']
+        self.format_parsers = {
+            '.pdf': PDFParser(),
+            '.docx': DOCXParser(),
+            '.txt': TXTParser()
+        }
+        self.preprocessor = TextPreprocessor()
+        self.section_detector = SectionDetector()
+    
+    def is_supported(self, file_path: str) -> bool:
+        """Check if the file format is supported."""
+        _, ext = os.path.splitext(file_path.lower())
+        return ext in self.supported_formats
+    
+    def _detect_format(self, file_path: str) -> str:
+        """Auto-detect file format from extension and MIME type."""
+        _, ext = os.path.splitext(file_path.lower())
+        
+        # Verify with MIME type as backup
+        mime_type, _ = mimetypes.guess_type(file_path)
+        
+        format_mapping = {
+            '.pdf': 'pdf',
+            '.docx': 'docx',
+            '.txt': 'txt'
+        }
+        
+        if ext in format_mapping:
+            return format_mapping[ext]
+        
+        # Fallback to MIME type detection
+        if mime_type:
+            if 'pdf' in mime_type:
+                return 'pdf'
+            elif 'word' in mime_type or 'officedocument' in mime_type:
+                return 'docx'
+            elif 'text' in mime_type:
+                return 'txt'
+        
+        raise ValueError(f"Unsupported file format: {ext}")
+    
+    def parse(self, file_path: str) -> Dict[str, Any]:
+        """
+        Parse document with auto-format detection.
+        
+        Returns:
+            Dict containing:
+            - text: str (extracted text)
+            - metadata: dict (file metadata)
+            - sections: list (detected sections)
+            - format: str (detected format)
+            - success: bool
+            - errors: list (any errors encountered)
+        """
+        result = {
+            'text': '',
+            'metadata': {},
+            'sections': [],
+            'format': '',
+            'success': False,
+            'errors': []
+        }
+        
+        try:
+            # Validate file exists
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(f"File not found: {file_path}")
+            
+            # Check if supported
+            if not self.is_supported(file_path):
+                raise ValueError(f"Unsupported file format: {file_path}")
+            
+            # Detect format
+            format_type = self._detect_format(file_path)
+            result['format'] = format_type
+            
+            # Get appropriate parser
+            ext = '.' + format_type
+            parser = self.format_parsers[ext]
+            
+            # Parse document
+            parsed_data = parser.parse(file_path)
+            
+            if not parsed_data['success']:
+                result['errors'].extend(parsed_data.get('errors', []))
+                return result
+            
+            # Extract raw text and metadata
+            raw_text = parsed_data['text']
+            result['metadata'] = parsed_data.get('metadata', {})
+            
+            # Preprocess text
+            cleaned_text = self.preprocessor.clean_text(raw_text)
+            result['text'] = cleaned_text
+            
+            # Detect sections
+            sections = self.section_detector.detect_sections(cleaned_text)
+            result['sections'] = sections
+            
+            result['success'] = True
+            
+        except Exception as e:
+            result['errors'].append(f"Error parsing document: {str(e)}")
+            result['success'] = False
+        
+        return result
+    
+    def parse_bytes(self, file_content: bytes, filename: str) -> Dict[str, Any]:
+        """
+        Parse document from bytes content.
+        Useful for uploaded files without saving to disk.
+        """
+        result = {
+            'text': '',
+            'metadata': {},
+            'sections': [],
+            'format': '',
+            'success': False,
+            'errors': []
+        }
+        
+        try:
+            # Detect format from filename
+            format_type = self._detect_format(filename)
+            result['format'] = format_type
+            
+            # Get appropriate parser
+            ext = '.' + format_type
+            parser = self.format_parsers[ext]
+            
+            # Parse from bytes if parser supports it
+            if hasattr(parser, 'parse_bytes'):
+                parsed_data = parser.parse_bytes(file_content)
+            else:
+                # Save temporarily and parse
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp_file:
+                    tmp_file.write(file_content)
+                    tmp_file.flush()
+                    parsed_data = parser.parse(tmp_file.name)
+                    os.unlink(tmp_file.name)
+            
+            if not parsed_data['success']:
+                result['errors'].extend(parsed_data.get('errors', []))
+                return result
+            
+            # Process the same way as file parsing
+            raw_text = parsed_data['text']
+            result['metadata'] = parsed_data.get('metadata', {})
+            
+            cleaned_text = self.preprocessor.clean_text(raw_text)
+            result['text'] = cleaned_text
+            
+            sections = self.section_detector.detect_sections(cleaned_text)
+            result['sections'] = sections
+            
+            result['success'] = True
+            
+        except Exception as e:
+            result['errors'].append(f"Error parsing document: {str(e)}")
+            result['success'] = False
+        
+        return result
+
+
+################################################################################
+# FILE: ./app/api/deps.py
+################################################################################
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from jose import JWTError, jwt
+from sqlalchemy.orm import Session
+
+from app.core.config import settings
+from app.db.session import get_db
+from app.schemas.user import TokenData
+
+# Constants
+SECRET_KEY = settings.SECRET_KEY  
+ALGORITHM = settings.ALGORITHM
+ACCESS_TOKEN_EXPIRE_MINUTES = settings.ACCESS_TOKEN_EXPIRE_MINUTES
+
+# OAuth2 scheme for token authentication
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.API_V1_STR}/auth/login")
+
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    """Get the current user from the token."""
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        if email is None:
+            raise credentials_exception
+        token_data = TokenData(email=email)
+    except JWTError:
+        raise credentials_exception
+    
+    # Import inside function to avoid circular import
+    from app.crud.user import get_user_by_email
+    
+    user = get_user_by_email(db, email=token_data.email)
+    if user is None:
+        raise credentials_exception
+    
+    return user
+
+def get_current_active_user(current_user = Depends(get_current_user)):
+    """Get current active user."""
+    if not current_user.is_active:
+        raise HTTPException(status_code=400, detail="Inactive user")
+    return current_user
+
+def get_current_active_superuser(current_user = Depends(get_current_user)):
+    """Get current active superuser."""
+    if not current_user.is_superuser:
+        raise HTTPException(
+            status_code=400, detail="The user doesn't have enough privileges"
+        )
+    return current_user
+
+
+################################################################################
+# FILE: ./app/api/__init__.py
+################################################################################
+
+
+
+################################################################################
+# FILE: ./app/api/v1/auth.py
+################################################################################
+from datetime import timedelta
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordRequestForm
+from sqlalchemy.orm import Session
+
+from app.db.session import get_db
+from app.schemas.user import UserCreate, User, Token
+from app.crud.user import get_user_by_email, create_user
+from app.core.security import (
+    verify_password,
+    create_access_token,
+)
+from app.core.config import settings
+from app.api.deps import get_current_user
+
+router = APIRouter()
+
+@router.post("/signup", response_model=User)
+def signup(user: UserCreate, db: Session = Depends(get_db)):
+    """Register a new user."""
+    db_user = get_user_by_email(db, email=user.email)
+    if db_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered"
+        )
+    return create_user(db=db, user=user)
+
+@router.post("/login", response_model=Token)
+def login(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db)
+):
+    """Authenticate and login a user."""
+    user = get_user_by_email(db, email=form_data.username)
+    if not user or not verify_password(form_data.password, user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.email}, expires_delta=access_token_expires
+    )
+    
+    return {"access_token": access_token, "token_type": "bearer"}
+
+@router.get("/me", response_model=User)
+def read_users_me(current_user: User = Depends(get_current_user)):
+    """Get information about the current authenticated user."""
+    return current_user
+
+
+################################################################################
+# FILE: ./app/api/v1/__init__.py
+################################################################################
+
+
+
+################################################################################
+# FILE: ./app/api/v1/contracts.py
+################################################################################
+# app/api/v1/contracts.py
+from typing import List
+
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from sqlalchemy.orm import Session
+
+from app.crud.contract import create_contract, get_contract, get_user_contracts, update_contract_analysis
+from app.models.user import User
+from app.schemas.contract import Contract, ContractCreate, ContractResponse
+from app.api.deps import get_current_user, get_db
+from app.services.file_parser import parse_contract_text
+from app.services.contract_analyzer import analyze_contract_text
+from app.schemas.analysis import ContractAnalysisResponse, ContractAnalysis
+
+router = APIRouter()
+
+@router.post("/upload", response_model=ContractResponse, status_code=status.HTTP_201_CREATED)
+async def upload_contract(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Upload and parse a contract file (PDF or DOCX).
+    The file content will be extracted and stored in the database.
+    """
+    try:
+        # Parse and extract text from the uploaded file
+        file_type, content = await parse_contract_text(file)
+        
+        # Create contract in DB
+        contract_in = ContractCreate(
+            filename=file.filename,
+            file_type=file_type,
+            content=content,
+            user_id=current_user.id
+        )
+        
+        contract = create_contract(db=db, contract=contract_in)
+        return contract
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        # Log the error
+        print(f"Error processing contract: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to process contract. Please try again."
+        )
+
+
+@router.get("/", response_model=List[ContractResponse])
+def list_user_contracts(
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get all contracts uploaded by the current user."""
+    contracts = get_user_contracts(
+        db=db, user_id=current_user.id, skip=skip, limit=limit
+    )
+    return contracts
+
+
+@router.get("/{contract_id}", response_model=Contract)
+def get_contract_detail(
+    contract_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get a specific contract including its content."""
+    contract = get_contract(db=db, contract_id=contract_id)
+    if not contract:
+        raise HTTPException(status_code=404, detail="Contract not found")
+    if contract.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not enough permissions")
+    return contract
+
+@router.post("/{contract_id}/analyze", response_model=ContractAnalysisResponse)
+async def analyze_contract(
+    contract_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Analyze contract text for specific clauses.
+    This endpoint will return the analysis results including
+    termination clause, confidentiality clause, payment terms,
+    governing law, and limitation of liability.
+    """
+    contract = get_contract(db=db, contract_id=contract_id)
+    if not contract:
+        raise HTTPException(status_code=404, detail="Contract not found")
+    
+    if contract.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not enough permissions")
+    
+    try:
+        analysis_results = await analyze_contract_text(contract.content)
+        
+        if "error" in analysis_results:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=analysis_results["error"]
+            )
+
+        updated_contract = update_contract_analysis(
+            db=db, 
+            contract_id=contract_id, 
+            analysis_results=analysis_results
+        )
+
+        analysis = ContractAnalysis(
+            termination_clause=analysis_results.get("termination_clause", "Not found"),
+            confidentiality_clause=analysis_results.get("confidentiality_clause", "Not found"),
+            payment_terms=analysis_results.get("payment_terms", "Not found"),
+            governing_law=analysis_results.get("governing_law", "Not found"),
+            limitation_of_liability=analysis_results.get("limitation_of_liability", "Not found")
+        )
+        
+        return ContractAnalysisResponse(
+            contract_id=contract_id,
+            analysis=analysis
+        )
+        
+    except Exception as e:
+        print(f"Error analyzing contract: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to analyze contract: {str(e)}"
+        )
+
+
+################################################################################
+# FILE: ./app/db/base.py
+################################################################################
+from app.db.base_class import Base  
+from app.models.user import User  
+from app.models.contract import Contract 
+
+
+################################################################################
+# FILE: ./app/db/base_class.py
+################################################################################
+from typing import Any
+
+from sqlalchemy.ext.declarative import as_declarative, declared_attr
+
+
+@as_declarative()
+class Base:
+    id: Any
+    __name__: str
+    
+    # Generates tablename automatically
+    @declared_attr
+    def __tablename__(cls) -> str:
+        return cls.__name__.lower()
+
+
+################################################################################
+# FILE: ./app/db/session.py
+################################################################################
+from sqlalchemy import create_engine
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+import os
+
+# Use DATABASE_URL from environment variables or default to SQLite
+SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./contract_analyzer.db")
+
+# For SQLite, connect_args is needed
+connect_args = {"check_same_thread": False} if SQLALCHEMY_DATABASE_URL.startswith("sqlite") else {}
+
+engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args=connect_args)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+Base = declarative_base()
+
+# Dependency to get DB session
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+################################################################################
+# FILE: ./app/utils/__init__.py
+################################################################################
+
+
+
+################################################################################
+# FILE: ./app/utils/aws.py
+################################################################################
+
+
+
+################################################################################
+# FILE: ./app/utils/docx_parser.py
+################################################################################
+
+
+
+################################################################################
+# FILE: ./app/utils/pdf_parser.py
+################################################################################
+
+
+
+################################################################################
+# FILE: ./app/crud/user.py
+################################################################################
+from sqlalchemy.orm import Session
+from app.models.user import User
+from app.schemas.user import UserCreate
+from app.core.security import get_password_hash
+
+def get_user_by_email(db: Session, email: str):
+    """Get a user by email."""
+    return db.query(User).filter(User.email == email).first()
+
+def get_user(db: Session, user_id: int):
+    """Get a user by ID."""
+    return db.query(User).filter(User.id == user_id).first()
+
+def create_user(db: Session, user: UserCreate):
+    """Create a new user."""
+    hashed_password = get_password_hash(user.password)
+    db_user = User(
+        email=user.email,
+        hashed_password=hashed_password,
+        full_name=user.full_name
+    )
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    return db_user
+
+
+################################################################################
+# FILE: ./app/crud/__init__.py
+################################################################################
+
+
+
+################################################################################
+# FILE: ./app/crud/contract.py
+################################################################################
+from typing import List, Optional, Dict, Any
+
+from sqlalchemy.orm import Session
+
+from app.models.contract import Contract
+from app.schemas.contract import ContractCreate
+
+def create_contract(db: Session, contract: ContractCreate) -> Contract:
+    db_contract = Contract(
+        user_id=contract.user_id,
+        filename=contract.filename,
+        file_type=contract.file_type,
+        content=contract.content
+    )
+    db.add(db_contract)
+    db.commit()
+    db.refresh(db_contract)
+    return db_contract
+
+
+def get_contract(db: Session, contract_id: int) -> Optional[Contract]:
+    return db.query(Contract).filter(Contract.id == contract_id).first()
+
+
+def get_user_contracts(db: Session, user_id: int, skip: int = 0, limit: int = 100) -> List[Contract]:
+    return db.query(Contract).filter(Contract.user_id == user_id).offset(skip).limit(limit).all()
+
+
+def delete_contract(db: Session, contract_id: int) -> bool:
+    contract = db.query(Contract).filter(Contract.id == contract_id).first()
+    if contract:
+        db.delete(contract)
+        db.commit()
+        return True
+    return False
+
+
+def update_contract_analysis(db: Session, contract_id: int, analysis_results: Dict[str, Any]) -> Optional[Contract]:
+    """Update a contract with analysis results."""
+    contract = db.query(Contract).filter(Contract.id == contract_id).first()
+    if contract:
+        contract.analysis_results = analysis_results
+        db.commit()
+        db.refresh(contract)
+        return contract
+    return None
+
+
+################################################################################
+# FILE: ./app/schemas/user.py
+################################################################################
+from typing import Optional
+from pydantic import BaseModel, EmailStr, Field
+from datetime import datetime
+
+class UserBase(BaseModel):
+    email: EmailStr
+    full_name: Optional[str] = None
+
+class UserCreate(UserBase):
+    password: str = Field(..., min_length=8)
+
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str
+
+class User(UserBase):
+    id: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class TokenData(BaseModel):
+    email: Optional[str] = None
+
+
+################################################################################
+# FILE: ./app/schemas/__init__.py
+################################################################################
+
+
+
+################################################################################
+# FILE: ./app/schemas/analysis.py
+################################################################################
+from typing import Optional
+from pydantic import BaseModel
+
+class ContractAnalysis(BaseModel):
+    """
+    Schema for contract analysis results.
+    This schema includes various clauses that are typically found in contracts.
+    """
+    termination_clause: str
+    confidentiality_clause: str
+    payment_terms: str 
+    governing_law: str
+    limitation_of_liability: str
+
+class ContractAnalysisResponse(BaseModel):
+    """
+    Schema for contract analysis API response.
+    This schema includes the contract ID and the analysis results.
+    """
+    contract_id: int
+    analysis: ContractAnalysis
+    
+    class Config:
+        from_attributes = True
+
+
+################################################################################
+# FILE: ./app/schemas/contract.py
+################################################################################
+from datetime import datetime
+from typing import Optional
+
+from pydantic import BaseModel, Field
+
+
+class ContractBase(BaseModel):
+    filename: str
+    file_type: str
+
+
+class ContractCreate(ContractBase):
+    content: str
+    user_id: int
+
+
+class ContractInDB(ContractBase):
+    id: int
+    user_id: int
+    content: str
+    uploaded_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class Contract(ContractInDB):
+    pass
+
+
+class ContractResponse(BaseModel):
+    id: int
+    filename: str
+    file_type: str
+    uploaded_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+################################################################################
+# FILE: ./app/core/__init__.py
+################################################################################
+
+
+
+################################################################################
+# FILE: ./app/core/security.py
+################################################################################
+from datetime import datetime, timedelta
+from typing import Optional
+
+from jose import jwt
+from passlib.context import CryptContext
+
+from app.core.config import settings
+
+# Constants
+SECRET_KEY = settings.SECRET_KEY
+ALGORITHM = settings.ALGORITHM
+ACCESS_TOKEN_EXPIRE_MINUTES = settings.ACCESS_TOKEN_EXPIRE_MINUTES
+
+# Password hashing context
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def verify_password(plain_password, hashed_password):
+    """Verify a password against a hash."""
+    return pwd_context.verify(plain_password, hashed_password)
+
+def get_password_hash(password):
+    """Hash a password for storing."""
+    return pwd_context.hash(password)
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    """Create a new JWT token."""
+    to_encode = data.copy()
+    
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+
+################################################################################
+# FILE: ./app/core/config.py
+################################################################################
+from pydantic_settings import BaseSettings
+
+class Settings(BaseSettings):
+    PROJECT_NAME: str = "AI Contract Analyzer"
+    BACKEND_CORS_ORIGINS: list[str] = ["*"]
+    DATABASE_URL: str = "sqlite:///./contract_analyzer.db" 
+    OPENAI_API_KEY: str = ""
+    CLAUDE_API_KEY: str = ""
+    HUGGINGFACE_API_TOKEN: str = ""
+    SECRET_KEY: str = "highly_secure_secret_key_for_jwt"
+    ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    API_V1_STR: str = "/api/v1"
+
+    class Config:
+        env_file = ".env"
+
+settings = Settings()
+
+

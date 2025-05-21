@@ -1,0 +1,246 @@
+# Contract Clause Definition Template
+# Schema for identifying and extracting key information from contract clauses
+
+clauses:
+  termination:
+    display_name: "Termination Clause"
+    keywords: ["termination", "terminate", "cancel", "end", "conclude", "dissolution", "expiry", "expire", "cessation", "discontinue"]
+    regex_patterns: 
+      - "(?i)(either|any|both)\\s+part(y|ies)\\s+may\\s+(terminate|end)"
+      - "(?i)(termination|terminate).*?(notice|days|months)"
+      - "(?i)(terminate|end).*?(with|without|for|upon).*?(cause|breach|default)"
+      - "(?i)(end|conclude|terminate)\\s+this\\s+(agreement|contract)"
+      - "(?i)(immediate|forthwith)\\s+(termination|terminate)"
+      - "(?i)\\d+\\s+(days?|months?)\\s+(notice|prior\\s+notice)"
+    output_fields:
+      - type  # for cause, without cause, convenience, breach, expiration
+      - notice_period  # 30 days, 60 days, immediate, etc.
+      - triggering_events  # material breach, insolvency, change of control
+      - termination_effects  # what happens upon termination
+      - survival_clauses  # which clauses survive termination
+
+  payment_terms:
+    display_name: "Payment Terms"
+    keywords: ["payment", "pay", "invoice", "invoicing", "due", "billing", "compensation", "fee", "remuneration", "amount", "sum", "charge"]
+    regex_patterns:
+      - "(?i)(payment|invoice).*?(due|payable).*?(within|in).*?\\d+.*?(days?|months?)"
+      - "(?i)\\d+\\s+(days?|months?)\\s+(from|after|of)\\s+(invoice|receipt)"
+      - "(?i)(late|overdue).*?(fee|penalty|interest|charge)"
+      - "(?i)\\$[\\d,]+\\.?\\d*|\\d+\\s+(dollars?|usd)"
+      - "(?i)(monthly|quarterly|annually|upon\\s+(delivery|completion))"
+      - "(?i)(net|gross)\\s+\\d+\\s+(days?|terms)"
+      - "(?i)(advance|upfront|down)\\s+payment"
+    output_fields:
+      - amount  # fixed amount, percentage, or calculation method
+      - payment_schedule  # monthly, quarterly, upon delivery, milestone-based
+      - due_date  # 30 days from invoice, net 30, etc.
+      - late_fees  # percentage or fixed amount for overdue payments
+      - payment_method  # wire transfer, check, ACH, credit card
+      - advance_payment  # deposits or upfront payments required
+
+  confidentiality:
+    display_name: "Confidentiality/Non-Disclosure Clause"
+    keywords: ["confidential", "confidentiality", "non-disclosure", "nda", "proprietary", "trade secret", "private", "sensitive", "privileged"]
+    regex_patterns:
+      - "(?i)(confidential|proprietary)\\s+(information|material|data)"
+      - "(?i)non-disclosure|non\\s+disclosure"
+      - "(?i)(trade|business)\\s+secret"
+      - "(?i)(shall|will|agree)\\s+(not\\s+)?(disclose|reveal|divulge)"
+      - "(?i)(maintain|keep|preserve)\\s+(confidential|secret)"
+      - "(?i)(return|destroy).*?(confidential|proprietary).*?(information|materials)"
+      - "(?i)(perpetual|indefinite|\\d+\\s+years?).*?duration"
+    output_fields:
+      - scope  # what information is covered (all info, specific categories)
+      - exceptions  # publicly known, independently developed, required by law
+      - duration  # perpetual, 5 years, duration of agreement + X years
+      - return_obligation  # return, destroy, or certify destruction
+      - permitted_disclosures  # employees, advisors, affiliates
+      - marking_requirements  # whether info must be marked confidential
+
+  intellectual_property:
+    display_name: "Intellectual Property Rights"
+    keywords: ["intellectual property", "copyright", "trademark", "patent", "work product", "ownership"]
+    regex_patterns:
+      - "(?i)intellectual.*?property"
+      - "(?i)work.*?product"
+      - "(?i)ownership.*?rights"
+      - "(?i)copyright.*?trademark"
+    output_fields:
+      - ownership  # who owns created IP
+      - existing_ip  # pre-existing rights
+      - license_grants  # usage rights granted
+      - work_for_hire  # whether applicable
+
+  governing_law:
+    display_name: "Governing Law and Jurisdiction"
+    keywords: ["governing law", "governed by", "jurisdiction", "courts", "laws of", "venue", "forum", "choice of law", "subject to"]
+    regex_patterns:
+      - "(?i)(governed|subject)\\s+(by|to)\\s+the\\s+laws\\s+of"
+      - "(?i)(jurisdiction|venue)\\s+(of|shall\\s+be\\s+in|lies\\s+in)"
+      - "(?i)(courts?\\s+of|state\\s+courts?|federal\\s+courts?)"
+      - "(?i)(laws\\s+of|statutes\\s+of)\\s+(the\\s+)?(state\\s+of|country\\s+of)"
+      - "(?i)(exclusive|non-exclusive)\\s+(jurisdiction|venue)"
+      - "(?i)(submit\\s+to|consent\\s+to)\\s+jurisdiction"
+    output_fields:
+      - governing_state  # New York, California, Delaware, etc.
+      - governing_country  # United States, United Kingdom, etc.
+      - court_jurisdiction  # state courts, federal courts, specific court
+      - venue_location  # specific city/county for legal proceedings
+      - exclusive_jurisdiction  # whether jurisdiction is exclusive or non-exclusive
+      - waiver_of_immunity  # sovereign immunity waivers if applicable
+
+  indemnification:
+    display_name: "Indemnification Clause"
+    keywords: ["indemnify", "hold harmless", "defend", "liability protection", "damages"]
+    regex_patterns:
+      - "(?i)indemnify.*?hold.*?harmless"
+      - "(?i)defend.*?against.*?claims"
+      - "(?i)liability.*?protection"
+      - "(?i)damages.*?arising.*?from"
+    output_fields:
+      - indemnifying_party  # who provides indemnification
+      - scope_of_indemnity  # what is covered
+      - exceptions  # excluded scenarios
+      - defense_obligation  # duty to defend claims
+
+  force_majeure:
+    display_name: "Force Majeure Clause"
+    keywords: ["force majeure", "act of god", "unforeseeable", "beyond control", "natural disaster", "pandemic", "epidemic", "government action", "war", "terrorism", "labor strike"]
+    regex_patterns:
+      - "(?i)force\\s+majeure"
+      - "(?i)act\\s+of\\s+god"
+      - "(?i)(beyond|outside)\\s+(reasonable\\s+)?control"
+      - "(?i)(unforeseeable|unforeseen)\\s+(circumstances|events?)"
+      - "(?i)(natural\\s+disaster|pandemic|epidemic|war|terrorism|strike)"
+      - "(?i)(government|regulatory)\\s+(action|order|decree)"
+      - "(?i)(excuse|suspend|relieve).*?(performance|obligations?)"
+    output_fields:
+      - covered_events  # specific events listed (disasters, war, government action, etc.)
+      - notice_requirements  # timing and method for notifying other party
+      - mitigation_efforts  # requirement to attempt to overcome the event
+      - duration_threshold  # how long event must last before rights triggered
+      - termination_rights  # when either party can terminate due to force majeure
+      - allocation_of_risk  # which party bears costs during force majeure
+
+  limitation_of_liability:
+    display_name: "Limitation of Liability"
+    keywords: ["limitation", "limit", "liability", "damages", "consequential", "indirect", "incidental", "special", "punitive", "exemplary", "cap", "exclude", "maximum"]
+    regex_patterns:
+      - "(?i)(limitation|limit)\\s+(of|on)\\s+liability"
+      - "(?i)(consequential|indirect|incidental|special|punitive|exemplary)\\s+damages"
+      - "(?i)liability.*?(shall\\s+)?(not\\s+)?exceed"
+      - "(?i)(exclude|disclaim).*?(indirect|consequential|incidental).*?damages"
+      - "(?i)(maximum|aggregate)\\s+(liability|damages)"
+      - "(?i)(\\$[\\d,]+\\.?\\d*|\\d+\\s+percent|amount\\s+paid)"
+      - "(?i)(gross\\s+negligence|willful\\s+misconduct|fraud).*?except"
+    output_fields:
+      - liability_cap  # maximum amount, percentage of fees paid, or calculation method
+      - excluded_damages  # consequential, indirect, punitive, lost profits
+      - exceptions  # gross negligence, willful misconduct, fraud, IP infringement
+      - carve_outs  # specific obligations excluded from limitation
+      - aggregate_vs_per_incident  # whether cap applies per claim or in total
+      - survival  # whether limitation survives termination
+
+  dispute_resolution:
+    display_name: "Dispute Resolution Clause"
+    keywords: ["dispute resolution", "arbitration", "mediation", "litigation", "binding"]
+    regex_patterns:
+      - "(?i)dispute.*?resolution"
+      - "(?i)arbitration.*?binding"
+      - "(?i)mediation.*?before.*?litigation"
+      - "(?i)resolve.*?disputes"
+    output_fields:
+      - primary_method  # arbitration, mediation, litigation
+      - arbitration_rules  # AAA, JAMS, etc.
+      - number_of_arbitrators  # 1 or 3
+      - location  # where disputes are resolved
+
+  warranties_and_representations:
+    display_name: "Warranties and Representations"
+    keywords: ["warrant", "represent", "guarantee", "assurance", "covenant"]
+    regex_patterns:
+      - "(?i)warrants.*?and.*?represents"
+      - "(?i)guarantee.*?that"
+      - "(?i)covenant.*?that"
+      - "(?i)as.*?of.*?date.*?hereof"
+    output_fields:
+      - warranty_type  # express, implied, performance
+      - scope  # what is warranted
+      - duration  # period of warranty
+      - remedies  # what happens if warranty breached
+
+  modification_and_amendment:
+    display_name: "Modification and Amendment"
+    keywords: ["modify", "amend", "change", "written agreement", "waiver"]
+    regex_patterns:
+      - "(?i)modify.*?only.*?in.*?writing"
+      - "(?i)amendment.*?signed.*?by.*?parties"
+      - "(?i)change.*?this.*?agreement"
+      - "(?i)waiver.*?must.*?be.*?written"
+    output_fields:
+      - modification_method  # written, signed amendment only
+      - waiver_requirements  # how waivers must be made
+      - partial_invalidity  # severability provisions
+      - entire_agreement  # whether this supersedes prior agreements
+
+  assignment_and_delegation:
+    display_name: "Assignment and Delegation"
+    keywords: ["assign", "transfer", "delegate", "successor", "binding upon"]
+    regex_patterns:
+      - "(?i)may.*?not.*?assign"
+      - "(?i)assignment.*?without.*?consent"
+      - "(?i)delegate.*?obligations"
+      - "(?i)binding.*?upon.*?successors"
+    output_fields:
+      - assignment_rights  # freely assignable, consent required, prohibited
+      - delegation_rights  # what obligations can be delegated
+      - successor_binding  # whether successors are bound
+      - change_of_control  # treatment of mergers/acquisitions
+
+  compliance_and_regulatory:
+    display_name: "Compliance and Regulatory"
+    keywords: ["comply", "applicable law", "regulation", "license", "permit"]
+    regex_patterns:
+      - "(?i)comply.*?with.*?applicable.*?law"
+      - "(?i)obtain.*?necessary.*?permits"
+      - "(?i)maintain.*?licenses"
+      - "(?i)regulatory.*?requirements"
+    output_fields:
+      - applicable_laws  # which laws must be followed
+      - licensing_requirements  # what licenses needed
+      - compliance_responsibility  # which party ensures compliance
+      - regulatory_changes  # how to handle law changes
+
+  data_protection_and_privacy:
+    display_name: "Data Protection and Privacy"
+    keywords: ["data protection", "privacy", "personal data", "GDPR", "processing"]
+    regex_patterns:
+      - "(?i)data.*?protection"
+      - "(?i)personal.*?data"
+      - "(?i)privacy.*?policy"
+      - "(?i)GDPR.*?compliance"
+    output_fields:
+      - data_types  # what data is covered
+      - processing_purposes  # why data is processed
+      - data_subject_rights  # access, deletion, etc.
+      - security_measures  # how data is protected
+
+  breach_and_remedies:
+    display_name: "Breach and Remedies"
+    keywords: ["breach", "default", "cure period", "remedies", "specific performance"]
+    regex_patterns:
+      - "(?i)material.*?breach"
+      - "(?i)cure.*?period"
+      - "(?i)default.*?notice"
+      - "(?i)remedies.*?available"
+    output_fields:
+      - breach_types  # material, non-material
+      - cure_period  # time to remedy breach
+      - notice_requirements  # how to notify of breach
+      - available_remedies  # damages, specific performance, termination
+
+# Usage Notes:
+# - Keywords should be comprehensive but not overly broad
+# - Regex patterns help identify clause structure and key phrases
+# - Output fields define what data to extract from identified clauses
+# - Each clause should have 3-6 output fields for practical extraction

@@ -1,0 +1,16 @@
+clauses:
+  - termination
+  - payment_terms
+  - confidentiality
+  - intellectual_property
+  - governing_law
+  - indemnification
+  - force_majeure
+  - limitation_of_liability
+  - dispute_resolution
+  - warranties_and_representations
+  - modification_and_amendment
+  - assignment_and_delegation
+  - compliance_and_regulatory
+  - data_protection_and_privacy
+  - breach_and_remedies

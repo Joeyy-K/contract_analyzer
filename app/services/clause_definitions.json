@@ -1,0 +1,323 @@
+{
+  "clause_types": {
+    "termination": {
+      "display_name": "Termination Clause",
+      "description": "Clauses that define how and when the contract can be terminated",
+      "primary_keywords": ["termination", "terminate", "cancel", "end", "conclude", "dissolution", "expiry", "expire", "cessation", "discontinue"],
+      "secondary_keywords": ["notice", "days", "months", "breach", "default", "cause", "convenience", "immediate", "forthwith"],
+      "negative_keywords": ["determination", "terminal", "predetermined", "exterminate", "terminate employment"],
+      "patterns": [
+        {
+          "regex": "(?i)(either|any|both)\\s+part(y|ies)\\s+may\\s+(terminate|end)",
+          "weight": 0.9,
+          "description": "Standard termination right clause"
+        },
+        {
+          "regex": "(?i)(termination|terminate).*?(notice|days|months)",
+          "weight": 0.8,
+          "description": "Termination with notice period"
+        },
+        {
+          "regex": "(?i)(terminate|end).*?(with|without|for|upon).*?(cause|breach|default)",
+          "weight": 0.85,
+          "description": "Termination for cause clause"
+        },
+        {
+          "regex": "(?i)(end|conclude|terminate)\\s+this\\s+(agreement|contract)",
+          "weight": 0.7,
+          "description": "Direct contract termination"
+        },
+        {
+          "regex": "(?i)(immediate|forthwith)\\s+(termination|terminate)",
+          "weight": 0.8,
+          "description": "Immediate termination clause"
+        },
+        {
+          "regex": "(?i)\\d+\\s+(days?|months?)\\s+(notice|prior\\s+notice)",
+          "weight": 0.6,
+          "description": "Notice period specification"
+        }
+      ],
+      "context_clues": ["agreement", "contract", "party", "parties", "breach", "default", "notice", "written", "material"],
+      "output_fields": {
+        "type": {
+          "description": "Type of termination",
+          "possible_values": ["for cause", "without cause", "convenience", "breach", "expiration", "mutual"]
+        },
+        "notice_period": {
+          "description": "Required notice period",
+          "extraction_pattern": "(?i)(\\d+)\\s+(days?|months?)\\s+(notice|prior\\s+notice)"
+        },
+        "triggering_events": {
+          "description": "Events that trigger termination",
+          "extraction_keywords": ["material breach", "insolvency", "change of control", "bankruptcy", "default"]
+        },
+        "termination_effects": {
+          "description": "Consequences of termination",
+          "extraction_keywords": ["payment", "return", "confidentiality", "survival", "obligations"]
+        },
+        "survival_clauses": {
+          "description": "Clauses that survive termination",
+          "extraction_pattern": "(?i)(survive|surviving|shall\\s+survive)"
+        }
+      },
+      "confidence_weights": {
+        "primary_keyword_match": 0.4,
+        "secondary_keyword_match": 0.2,
+        "pattern_match": 0.25,
+        "context_clue_match": 0.1,
+        "negative_keyword_penalty": -0.3
+      },
+      "minimum_confidence_threshold": 0.6
+    },
+    "payment_terms": {
+      "display_name": "Payment Terms",
+      "description": "Clauses defining payment obligations, schedules, and methods",
+      "primary_keywords": ["payment", "pay", "invoice", "invoicing", "due", "billing", "compensation", "fee", "remuneration", "amount", "sum", "charge"],
+      "secondary_keywords": ["net", "gross", "advance", "upfront", "penalty", "interest", "overdue", "late", "within", "monthly", "quarterly"],
+      "negative_keywords": ["payment card", "payment gateway", "payment processor"],
+      "patterns": [
+        {
+          "regex": "(?i)(payment|invoice).*?(due|payable).*?(within|in).*?\\d+.*?(days?|months?)",
+          "weight": 0.9,
+          "description": "Payment due within specified period"
+        },
+        {
+          "regex": "(?i)\\d+\\s+(days?|months?)\\s+(from|after|of)\\s+(invoice|receipt)",
+          "weight": 0.85,
+          "description": "Payment timing from invoice/receipt"
+        },
+        {
+          "regex": "(?i)(late|overdue).*?(fee|penalty|interest|charge)",
+          "weight": 0.8,
+          "description": "Late payment penalties"
+        },
+        {
+          "regex": "(?i)\\$[\\d,]+\\.?\\d*|\\d+\\s+(dollars?|usd)",
+          "weight": 0.7,
+          "description": "Specific payment amounts"
+        },
+        {
+          "regex": "(?i)(monthly|quarterly|annually|upon\\s+(delivery|completion))",
+          "weight": 0.75,
+          "description": "Payment schedule"
+        },
+        {
+          "regex": "(?i)(net|gross)\\s+\\d+\\s+(days?|terms)",
+          "weight": 0.8,
+          "description": "Net payment terms"
+        },
+        {
+          "regex": "(?i)(advance|upfront|down)\\s+payment",
+          "weight": 0.7,
+          "description": "Advance payment requirements"
+        }
+      ],
+      "context_clues": ["contract", "services", "goods", "delivery", "completion", "milestone", "invoice", "receipt"],
+      "output_fields": {
+        "amount": {
+          "description": "Payment amount or calculation method",
+          "extraction_pattern": "(?i)\\$[\\d,]+\\.?\\d*|\\d+\\s+percent|\\d+%"
+        },
+        "payment_schedule": {
+          "description": "When payments are due",
+          "extraction_keywords": ["monthly", "quarterly", "annually", "upon delivery", "milestone-based", "completion"]
+        },
+        "due_date": {
+          "description": "Payment due date specification",
+          "extraction_pattern": "(?i)(\\d+)\\s+(days?|months?)\\s+(from|after|of|net)"
+        },
+        "late_fees": {
+          "description": "Penalties for late payment",
+          "extraction_pattern": "(?i)(\\d+\\.?\\d*)\\s*%|(\\$[\\d,]+\\.?\\d*)"
+        },
+        "payment_method": {
+          "description": "How payments should be made",
+          "extraction_keywords": ["wire transfer", "check", "ACH", "credit card", "bank transfer"]
+        },
+        "advance_payment": {
+          "description": "Upfront payment requirements",
+          "extraction_keywords": ["deposit", "advance", "upfront", "down payment"]
+        }
+      },
+      "confidence_weights": {
+        "primary_keyword_match": 0.4,
+        "secondary_keyword_match": 0.2,
+        "pattern_match": 0.25,
+        "context_clue_match": 0.1,
+        "negative_keyword_penalty": -0.2
+      },
+      "minimum_confidence_threshold": 0.65
+    },
+    "confidentiality": {
+      "display_name": "Confidentiality/Non-Disclosure",
+      "description": "Clauses protecting confidential information and trade secrets",
+      "primary_keywords": ["confidential", "confidentiality", "non-disclosure", "nda", "proprietary", "trade secret", "private", "sensitive", "privileged"],
+      "secondary_keywords": ["disclose", "reveal", "divulge", "maintain", "protect", "return", "destroy", "perpetual", "duration"],
+      "negative_keywords": ["confidential manner", "in confidence"],
+      "patterns": [
+        {
+          "regex": "(?i)(confidential|proprietary)\\s+(information|material|data)",
+          "weight": 0.9,
+          "description": "Confidential information definition"
+        },
+        {
+          "regex": "(?i)non-disclosure|non\\s+disclosure",
+          "weight": 0.95,
+          "description": "Non-disclosure agreement"
+        },
+        {
+          "regex": "(?i)(trade|business)\\s+secret",
+          "weight": 0.85,
+          "description": "Trade secret protection"
+        },
+        {
+          "regex": "(?i)(shall|will|agree)\\s+(not\\s+)?(disclose|reveal|divulge)",
+          "weight": 0.8,
+          "description": "Non-disclosure obligation"
+        },
+        {
+          "regex": "(?i)(maintain|keep|preserve)\\s+(confidential|secret)",
+          "weight": 0.75,
+          "description": "Confidentiality maintenance"
+        },
+        {
+          "regex": "(?i)(return|destroy).*?(confidential|proprietary).*?(information|materials)",
+          "weight": 0.7,
+          "description": "Return/destruction obligation"
+        },
+        {
+          "regex": "(?i)(perpetual|indefinite|\\d+\\s+years?).*?duration",
+          "weight": 0.6,
+          "description": "Duration of confidentiality"
+        }
+      ],
+      "context_clues": ["agreement", "party", "parties", "information", "materials", "documents", "data"],
+      "output_fields": {
+        "scope": {
+          "description": "What information is covered",
+          "extraction_keywords": ["all information", "technical data", "business information", "financial data"]
+        },
+        "exceptions": {
+          "description": "Information not covered by confidentiality",
+          "extraction_keywords": ["publicly known", "independently developed", "required by law", "prior knowledge"]
+        },
+        "duration": {
+          "description": "How long confidentiality lasts",
+          "extraction_pattern": "(?i)(perpetual|indefinite|\\d+\\s+years?|duration\\s+of\\s+agreement)"
+        },
+        "return_obligation": {
+          "description": "Requirements to return or destroy information",
+          "extraction_keywords": ["return", "destroy", "delete", "certify destruction"]
+        },
+        "permitted_disclosures": {
+          "description": "Who can receive the information",
+          "extraction_keywords": ["employees", "advisors", "affiliates", "need to know"]
+        },
+        "marking_requirements": {
+          "description": "How confidential information must be marked",
+          "extraction_keywords": ["marked confidential", "labeled", "identified as"]
+        }
+      },
+      "confidence_weights": {
+        "primary_keyword_match": 0.45,
+        "secondary_keyword_match": 0.2,
+        "pattern_match": 0.25,
+        "context_clue_match": 0.05,
+        "negative_keyword_penalty": -0.25
+      },
+      "minimum_confidence_threshold": 0.7
+    },
+    "governing_law": {
+      "display_name": "Governing Law and Jurisdiction",
+      "description": "Clauses specifying which laws govern the contract and where disputes will be resolved",
+      "primary_keywords": ["governing law", "governed by", "jurisdiction", "courts", "laws of", "venue", "forum", "choice of law", "subject to"],
+      "secondary_keywords": ["state", "federal", "exclusive", "submit to", "consent to", "waiver", "immunity"],
+      "negative_keywords": ["government", "governing board", "governing body"],
+      "patterns": [
+        {
+          "regex": "(?i)(governed|subject)\\s+(by|to)\\s+the\\s+laws\\s+of",
+          "weight": 0.95,
+          "description": "Governing law specification"
+        },
+        {
+          "regex": "(?i)(jurisdiction|venue)\\s+(of|shall\\s+be\\s+in|lies\\s+in)",
+          "weight": 0.9,
+          "description": "Jurisdiction specification"
+        },
+        {
+          "regex": "(?i)(courts?\\s+of|state\\s+courts?|federal\\s+courts?)",
+          "weight": 0.8,
+          "description": "Court specification"
+        },
+        {
+          "regex": "(?i)(laws\\s+of|statutes\\s+of)\\s+(the\\s+)?(state\\s+of|country\\s+of)",
+          "weight": 0.85,
+          "description": "Laws of specific jurisdiction"
+        },
+        {
+          "regex": "(?i)(exclusive|non-exclusive)\\s+(jurisdiction|venue)",
+          "weight": 0.75,
+          "description": "Exclusivity of jurisdiction"
+        },
+        {
+          "regex": "(?i)(submit\\s+to|consent\\s+to)\\s+jurisdiction",
+          "weight": 0.7,
+          "description": "Consent to jurisdiction"
+        }
+      ],
+      "context_clues": ["agreement", "contract", "parties", "disputes", "legal", "proceedings"],
+      "output_fields": {
+        "governing_state": {
+          "description": "State/province whose laws govern",
+          "extraction_pattern": "(?i)laws\\s+of\\s+(the\\s+)?(state\\s+of\\s+)?([A-Z][a-z]+)"
+        },
+        "governing_country": {
+          "description": "Country whose laws govern",
+          "extraction_keywords": ["United States", "United Kingdom", "Canada", "Australia"]
+        },
+        "court_jurisdiction": {
+          "description": "Which courts have jurisdiction",
+          "extraction_keywords": ["state courts", "federal courts", "superior court", "district court"]
+        },
+        "venue_location": {
+          "description": "Where legal proceedings occur",
+          "extraction_pattern": "(?i)venue\\s+.*?in\\s+([A-Z][a-z]+(?:\\s+[A-Z][a-z]+)*)"
+        },
+        "exclusive_jurisdiction": {
+          "description": "Whether jurisdiction is exclusive",
+          "extraction_keywords": ["exclusive", "non-exclusive", "sole"]
+        },
+        "waiver_of_immunity": {
+          "description": "Any immunity waivers",
+          "extraction_keywords": ["waiver", "immunity", "sovereign immunity"]
+        }
+      },
+      "confidence_weights": {
+        "primary_keyword_match": 0.5,
+        "secondary_keyword_match": 0.15,
+        "pattern_match": 0.25,
+        "context_clue_match": 0.05,
+        "negative_keyword_penalty": -0.3
+      },
+      "minimum_confidence_threshold": 0.75
+    }
+  },
+  "global_settings": {
+    "case_sensitive": false,
+    "word_boundaries": true,
+    "minimum_clause_length": 50,
+    "maximum_clause_length": 2000,
+    "overlap_threshold": 0.3,
+    "context_window_size": 100,
+    "stemming_enabled": true,
+    "lemmatization_enabled": false
+  },
+  "extraction_rules": {
+    "sentence_boundary_required": true,
+    "merge_adjacent_matches": true,
+    "minimum_keyword_density": 0.02,
+    "maximum_false_positive_rate": 0.1,
+    "confidence_normalization": true
+  }
+}

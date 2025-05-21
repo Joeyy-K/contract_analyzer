@@ -1,16 +1,21 @@
 from typing import Optional
 from pydantic import BaseModel
 
+class ClauseResult(BaseModel):
+    text: str
+    confidence: float
+    found: bool
+
 class ContractAnalysis(BaseModel):
     """
     Schema for contract analysis results.
     This schema includes various clauses that are typically found in contracts.
     """
-    termination_clause: str
-    confidentiality_clause: str
-    payment_terms: str 
-    governing_law: str
-    limitation_of_liability: str
+    termination: ClauseResult
+    confidentiality: ClauseResult 
+    payment_terms: ClauseResult
+    governing_law: ClauseResult
+    liability: ClauseResult
 
 class ContractAnalysisResponse(BaseModel):
     """
@@ -19,6 +24,7 @@ class ContractAnalysisResponse(BaseModel):
     """
     contract_id: int
     analysis: ContractAnalysis
+    engine: str 
     
     class Config:
         from_attributes = True
